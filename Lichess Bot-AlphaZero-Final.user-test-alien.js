@@ -279,6 +279,46 @@ let consecutiveAdvantage = 0;       // Track how long we've been winning
 let positionalPressure = 0;         // Accumulated positional pressure
 let blunderCheckHistory = [];       // Recent move evaluations for blunder detection
 
+// ═══════════════════════════════════════════════════════════════════════
+// LOCK-FREE STATE MANAGEMENT - DEADLOCK-PROOF SYSTEM
+// Critical fix for bot stopping mid-game
+// ═══════════════════════════════════════════════════════════════════════
+
+// Core position tracking
+let lastSeenPositionId = null;        // Track message.v
+let lastSeenFen = null;               // Track FEN string
+let currentCalculatingColor = null;   // Track which color is currently calculating ('w' or 'b')
+
+// Lock system - SIMPLIFIED
+let calculationLock = false;          // Prevent overlapping calculations
+let calculationStartTime = 0;         // When current calculation started
+let lastSuccessfulMoveTime = 0;       // When last move was successfully sent
+
+// Position ready tracking - PER COLOR
+let whitePositionReady = false;       // White has a position to calculate
+let blackPositionReady = false;       // Black has a position to calculate
+let lastWhitePositionTime = 0;        // When White's position became ready
+let lastBlackPositionTime = 0;        // When Black's position became ready
+
+// Manual move detection - PER COLOR
+let whiteHumanMovedRecently = false;  // White player moved manually recently
+let blackHumanMovedRecently = false;  // Black player moved manually recently
+let whiteDebounceTimer = null;        // White's debounce timer
+let blackDebounceTimer = null;        // Black's debounce timer
+
+// Timers
+let calculationTimeout = null;        // Safety timeout for calculation
+let messageDebounceTimer = null;      // Debounce rapid messages
+let absoluteWatchdogTimer = null;     // ABSOLUTE watchdog - overrides everything
+let healthCheckInterval = null;       // Periodic health check
+
+// Move tracking
+let pendingMove = null;               // Track move being sent
+let moveConfirmationTimer = null;     // Timer to confirm move was accepted
+let lastRejectedMove = null;          // Track last rejected move
+let rejectionCount = 0;               // Count consecutive rejections
+let botJustSentMove = false;          // True after we send, false after confirmation
+
 // TRANSCENDENT: Endgame tablebase-like patterns
 const WINNING_ENDGAMES = {
     KQvK: { depth: 10, technique: "centralize-king-push-edge" },
@@ -682,6 +722,47 @@ function resetGameState() {
     positionalPressure = 0;
     blunderCheckHistory = [];
     strategicPlan = "neutral";
+    
+    // Reset lock system
+    calculationLock = false;
+    calculationStartTime = 0;
+    currentCalculatingColor = null;
+    lastSuccessfulMoveTime = 0;
+    
+    // Reset position tracking
+    lastSeenPositionId = null;
+    lastSeenFen = null;
+    whitePositionReady = false;
+    blackPositionReady = false;
+    lastWhitePositionTime = 0;
+    lastBlackPositionTime = 0;
+    
+    // Reset human move detection
+    whiteHumanMovedRecently = false;
+    blackHumanMovedRecently = false;
+    
+    // Clear timers
+    if (whiteDebounceTimer) {
+        clearTimeout(whiteDebounceTimer);
+        whiteDebounceTimer = null;
+    }
+    if (blackDebounceTimer) {
+        clearTimeout(blackDebounceTimer);
+        blackDebounceTimer = null;
+    }
+    if (calculationTimeout) {
+        clearTimeout(calculationTimeout);
+        calculationTimeout = null;
+    }
+    clearAbsoluteWatchdog();
+    
+    // Reset move tracking
+    pendingMove = null;
+    lastRejectedMove = null;
+    rejectionCount = 0;
+    botJustSentMove = false;
+    
+    console.log('[RESET] Game state reset for new game');
 }
 
 /**
@@ -1052,6 +1133,217 @@ function updateWinningStatus(evalData) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// HELPER FUNCTIONS - Get active color from FEN
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * Extract active color from FEN string
+ * @param {string} fen - FEN string
+ * @returns {string|null} 'w' or 'b' or null if invalid
+ */
+function getActiveColorFromFen(fen) {
+    if (!fen || typeof fen !== 'string') return null;
+    const parts = fen.split(' ');
+    if (parts.length >= 2 && (parts[1] === 'w' || parts[1] === 'b')) {
+        return parts[1];
+    }
+    // Also check if color is appended at end (lichess format)
+    if (fen.endsWith(' w')) return 'w';
+    if (fen.endsWith(' b')) return 'b';
+    return null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ABSOLUTE WATCHDOG & HEALTH CHECK SYSTEM
+// Critical fix: Prevents bot from stopping mid-game
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * Health check runs every 2 seconds and forces action if stuck
+ * This is the ABSOLUTE safety net - no conditions, just action
+ */
+function startHealthCheckSystem() {
+    if (healthCheckInterval) {
+        clearInterval(healthCheckInterval);
+    }
+    
+    healthCheckInterval = setInterval(() => {
+        const now = Date.now();
+        
+        // Check 1: Calculation running too long (> 5 seconds)
+        if (calculationLock && calculationStartTime > 0) {
+            const calcDuration = now - calculationStartTime;
+            if (calcDuration > 5000) {
+                console.log(`[HEALTH] 🚨 CRITICAL: Calculation stuck for ${calcDuration}ms - FORCING UNLOCK`);
+                forceUnlockAndReset("calculation timeout");
+                return;
+            }
+        }
+        
+        // Check 2: Position ready but no calculation started (> 3 seconds)
+        if (!calculationLock && currentFen && webSocketWrapper && webSocketWrapper.readyState === 1) {
+            const fenActiveColor = getActiveColorFromFen(currentFen);
+            if (fenActiveColor) {
+                const isWhite = (fenActiveColor === 'w');
+                const positionReady = isWhite ? whitePositionReady : blackPositionReady;
+                const positionTime = isWhite ? lastWhitePositionTime : lastBlackPositionTime;
+                const humanMoved = isWhite ? whiteHumanMovedRecently : blackHumanMovedRecently;
+                
+                if (positionReady && positionTime > 0) {
+                    const waitDuration = now - positionTime;
+                    if (waitDuration > 3000 && !humanMoved) {
+                        console.log(`[HEALTH] 🚨 CRITICAL: Position ready for ${waitDuration}ms but no calculation - FORCING START`);
+                        forceCalculation(fenActiveColor);
+                        return;
+                    }
+                }
+            }
+        }
+        
+        // Check 3: No successful move in last 20 seconds (game active)
+        if (lastSuccessfulMoveTime > 0 && currentFen && webSocketWrapper && webSocketWrapper.readyState === 1) {
+            const timeSinceLastMove = now - lastSuccessfulMoveTime;
+            if (timeSinceLastMove > 20000) {
+                console.log(`[HEALTH] 🚨 CRITICAL: No move sent in ${timeSinceLastMove}ms - FORCING RESET`);
+                forceUnlockAndReset("no recent moves");
+                forceCalculation(getActiveColorFromFen(currentFen));
+                return;
+            }
+        }
+        
+        // Check 4: Clear stale debounce flags (> 2 seconds old)
+        if (whiteHumanMovedRecently && lastWhitePositionTime > 0 && now - lastWhitePositionTime > 2000) {
+            whiteHumanMovedRecently = false;
+            if (whiteDebounceTimer) {
+                clearTimeout(whiteDebounceTimer);
+                whiteDebounceTimer = null;
+            }
+        }
+        if (blackHumanMovedRecently && lastBlackPositionTime > 0 && now - lastBlackPositionTime > 2000) {
+            blackHumanMovedRecently = false;
+            if (blackDebounceTimer) {
+                clearTimeout(blackDebounceTimer);
+                blackDebounceTimer = null;
+            }
+        }
+        
+    }, 2000); // Check every 2 seconds
+    
+    console.log('[HEALTH] ✅ Health check system started (2s interval)');
+}
+
+/**
+ * Force unlock all locks and reset state - UNCONDITIONAL
+ */
+function forceUnlockAndReset(reason) {
+    console.log(`[FORCE] 💥 FORCE UNLOCK - Reason: ${reason}`);
+    console.log(`[FORCE]   Before: calculationLock=${calculationLock}, whiteReady=${whitePositionReady}, blackReady=${blackPositionReady}`);
+    
+    // Clear ALL locks unconditionally
+    calculationLock = false;
+    calculationStartTime = 0;
+    currentCalculatingColor = null;
+    
+    // Clear all timers
+    if (calculationTimeout) {
+        clearTimeout(calculationTimeout);
+        calculationTimeout = null;
+    }
+    if (messageDebounceTimer) {
+        clearTimeout(messageDebounceTimer);
+        messageDebounceTimer = null;
+    }
+    if (absoluteWatchdogTimer) {
+        clearTimeout(absoluteWatchdogTimer);
+        absoluteWatchdogTimer = null;
+    }
+    
+    // Stop engine if needed
+    if (chessEngine) {
+        chessEngine.postMessage("stop");
+    }
+    
+    console.log('[FORCE]   After: All locks cleared, state reset');
+}
+
+/**
+ * Force calculation to start - bypasses all normal checks
+ */
+function forceCalculation(colorToCalculate) {
+    console.log(`[FORCE] ⚡ FORCE CALCULATION for ${colorToCalculate === 'w' ? 'White' : 'Black'}`);
+    
+    if (!currentFen || !chessEngine || !webSocketWrapper || webSocketWrapper.readyState !== 1) {
+        console.log('[FORCE] ❌ Cannot force calculation - missing prerequisites');
+        return;
+    }
+    
+    // Verify FEN color matches
+    const fenColor = getActiveColorFromFen(currentFen);
+    if (fenColor !== colorToCalculate) {
+        console.log(`[FORCE] ❌ Color mismatch: want ${colorToCalculate}, FEN has ${fenColor}`);
+        return;
+    }
+    
+    // Force unlock first
+    forceUnlockAndReset("forced calculation");
+    
+    // Set position as ready
+    if (colorToCalculate === 'w') {
+        whitePositionReady = true;
+        lastWhitePositionTime = Date.now();
+    } else {
+        blackPositionReady = true;
+        lastBlackPositionTime = Date.now();
+    }
+    
+    // Immediately call calculateMove
+    setTimeout(() => calculateMove(), 100);
+}
+
+/**
+ * Start absolute watchdog - overrides everything after timeout
+ */
+function startAbsoluteWatchdog() {
+    // Clear any existing watchdog
+    if (absoluteWatchdogTimer) {
+        clearTimeout(absoluteWatchdogTimer);
+    }
+    
+    // Set 8-second absolute timeout
+    absoluteWatchdogTimer = setTimeout(() => {
+        const now = Date.now();
+        const calcDuration = calculationStartTime > 0 ? now - calculationStartTime : 0;
+        
+        console.log('[WATCHDOG] 🚨 ABSOLUTE WATCHDOG TRIGGERED (8s)');
+        console.log(`[WATCHDOG]   calculationLock: ${calculationLock}`);
+        console.log(`[WATCHDOG]   Calculation duration: ${calcDuration}ms`);
+        console.log(`[WATCHDOG]   Current FEN: ${currentFen}`);
+        
+        // UNCONDITIONALLY force unlock and reset
+        forceUnlockAndReset("absolute watchdog timeout");
+        
+        // If we have a FEN and WebSocket, try to recover
+        if (currentFen && webSocketWrapper && webSocketWrapper.readyState === 1) {
+            const fenActiveColor = getActiveColorFromFen(currentFen);
+            if (fenActiveColor) {
+                console.log(`[WATCHDOG] ✅ Attempting recovery for ${fenActiveColor === 'w' ? 'White' : 'Black'}`);
+                setTimeout(() => forceCalculation(fenActiveColor), 500);
+            }
+        }
+    }, 8000);
+}
+
+/**
+ * Clear absolute watchdog (called when move is successfully sent)
+ */
+function clearAbsoluteWatchdog() {
+    if (absoluteWatchdogTimer) {
+        clearTimeout(absoluteWatchdogTimer);
+        absoluteWatchdogTimer = null;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // ENGINE INITIALIZATION - TRANSCENDENT POWER
 // Maximum strength with strategic depth configuration
 // ═══════════════════════════════════════════════════════════════════════
@@ -1071,6 +1363,9 @@ function initializeChessEngine() {
     // TRANSCENDENT: Aggressive pruning disabled for accuracy
     chessEngine.postMessage("setoption name Slow Mover value 100");
     chessEngine.postMessage("isready");
+    
+    // Start health check system after engine is ready
+    startHealthCheckSystem();
 }
 
 /**
@@ -1099,7 +1394,7 @@ function adjustContempt() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// WEBSOCKET INTERCEPTION (STABLE - Proven working)
+// WEBSOCKET INTERCEPTION (Enhanced with recovery system)
 // ═══════════════════════════════════════════════════════════════════════
 
 function interceptWebSocket() {
@@ -1128,6 +1423,14 @@ function interceptWebSocket() {
                         resetGameState();
                     }
                     
+                    // Clear bot move flag after receiving position update
+                    if (botJustSentMove && message.d && message.d.fen) {
+                        botJustSentMove = false;
+                        // Reset rejection tracking on successful move
+                        lastRejectedMove = null;
+                        rejectionCount = 0;
+                    }
+                    
                     // Extract time remaining if available
                     if (message.d && message.d.wc !== undefined) {
                         timeRemaining = myColor === 'w' ? message.d.wc * 10 : message.d.bc * 10;
@@ -1147,6 +1450,25 @@ function interceptWebSocket() {
                         
                         moveCount = Math.floor(message.v / 2) + 1;
                         
+                        // Track position ID for deduplication
+                        const positionId = message.v;
+                        if (lastSeenPositionId === positionId) {
+                            // Same position, skip to prevent double calculation
+                            return;
+                        }
+                        lastSeenPositionId = positionId;
+                        lastSeenFen = currentFen;
+                        
+                        // Set position ready for the active color
+                        const now = Date.now();
+                        if (isWhitesTurn) {
+                            whitePositionReady = true;
+                            lastWhitePositionTime = now;
+                        } else {
+                            blackPositionReady = true;
+                            lastBlackPositionTime = now;
+                        }
+                        
                         // TRANSCENDENT: Track position for web-weaving
                         trackPosition(currentFen);
                         
@@ -1157,6 +1479,21 @@ function interceptWebSocket() {
                         
                         // TRANSCENDENT: Adjust contempt dynamically
                         adjustContempt();
+                        
+                        // Start absolute watchdog before calculation
+                        startAbsoluteWatchdog();
+                        
+                        // Check if we're already calculating for this color
+                        if (calculationLock && currentCalculatingColor === myColor) {
+                            console.log(`[WS] Already calculating for ${myColor}, skipping`);
+                            return;
+                        }
+                        
+                        // If locked for different color, force unlock
+                        if (calculationLock && currentCalculatingColor !== myColor) {
+                            console.log(`[WS] Color changed from ${currentCalculatingColor} to ${myColor}, forcing unlock`);
+                            forceUnlockAndReset("color change");
+                        }
                         
                         calculateMove();
                     }
@@ -1175,7 +1512,7 @@ function interceptWebSocket() {
 // ═══════════════════════════════════════════════════════════════════════
 // MOVE CALCULATION - TRANSCENDENT STRATEGIC DEPTH
 // Deep understanding with 30+ move strategic planning
-// FIXED: Added validation checks to prevent undefined behavior
+// FIXED: Added lock management and recovery system
 // ═══════════════════════════════════════════════════════════════════════
 
 function calculateMove() {
@@ -1191,6 +1528,50 @@ function calculateMove() {
         return;
     }
     
+    // FIXED: Check for WebSocket readiness
+    if (!webSocketWrapper || webSocketWrapper.readyState !== 1) {
+        console.error('TRANSCENDENT: WebSocket not ready');
+        return;
+    }
+    
+    // FIXED: Check calculation lock
+    if (calculationLock) {
+        console.log('[ENGINE] Already calculating, skipping');
+        return;
+    }
+    
+    // Check for excessive rejections - reset and add randomness
+    if (rejectionCount > 5) {
+        console.log(`[ENGINE] Too many rejections (${rejectionCount}) - forcing full reset`);
+        lastRejectedMove = null;
+        rejectionCount = 0;
+        setTimeout(() => calculateMove(), Math.random() * 500 + 200);
+        return;
+    }
+    
+    // Extract active color from FEN
+    const fenActiveColor = getActiveColorFromFen(currentFen);
+    if (!fenActiveColor) {
+        console.error('TRANSCENDENT: Cannot extract active color from FEN');
+        return;
+    }
+    
+    const isWhite = (fenActiveColor === 'w');
+    const colorName = isWhite ? 'White' : 'Black';
+    
+    // Set calculation lock and track color
+    calculationLock = true;
+    calculationStartTime = Date.now();
+    currentCalculatingColor = fenActiveColor;
+    console.log(`[LOCK] 🔒 Calculation lock SET for ${colorName}`);
+    
+    // Clear position ready flag for this color
+    if (isWhite) {
+        whitePositionReady = false;
+    } else {
+        blackPositionReady = false;
+    }
+    
     // Opening book for variety and strategic preparation
     if (gamePhase === "opening" || (gamePhase === "early-middlegame" && moveCount < 12)) {
         const bookMove = getBookMove(currentFen);
@@ -1201,6 +1582,11 @@ function calculateMove() {
             
             setTimeout(() => {
                 bestMove = bookMove;
+                // Release lock before sending
+                calculationLock = false;
+                calculationStartTime = 0;
+                currentCalculatingColor = null;
+                console.log('[LOCK] 🔓 Calculation lock RELEASED (book move)');
                 sendMove(bookMove);
             }, thinkTime);
             
@@ -1226,16 +1612,20 @@ function calculateMove() {
         chessEngine.postMessage(`go depth ${depth}`);
     }
     
-    setTimeout(() => {
-        // Handled by engine message callback
-    }, thinkTime);
+    // Set a safety timeout to release lock if engine doesn't respond
+    calculationTimeout = setTimeout(() => {
+        if (calculationLock) {
+            console.log('[TIMEOUT] ⚠️ Engine calculation timeout - forcing unlock');
+            forceUnlockAndReset("calculation timeout");
+        }
+    }, 10000); // 10 second timeout
 }
 
 /**
  * Send move - Clean, fast, confident
- * FIXED: Comprehensive validation before sending
+ * FIXED: Comprehensive validation and move confirmation tracking
  */
-function sendMove(move) {
+function sendMove(move, retryCount = 0) {
     // CRITICAL FIX: Validate webSocketWrapper exists and is connected
     if (!webSocketWrapper) {
         console.error('TRANSCENDENT: Cannot send move - WebSocket not initialized');
@@ -1245,6 +1635,11 @@ function sendMove(move) {
     // CRITICAL FIX: Validate webSocketWrapper readyState
     if (webSocketWrapper.readyState !== WebSocket.OPEN) {
         console.error('TRANSCENDENT: Cannot send move - WebSocket not open (state:', webSocketWrapper.readyState, ')');
+        // Retry if this is a temporary issue
+        if (retryCount < 3) {
+            console.log(`[SEND] Retrying in 300ms (attempt ${retryCount + 1})`);
+            setTimeout(() => sendMove(move, retryCount + 1), 300);
+        }
         return false;
     }
     
@@ -1254,7 +1649,24 @@ function sendMove(move) {
         return false;
     }
     
+    // Check if this is a previously rejected move
+    if (move === lastRejectedMove) {
+        rejectionCount++;
+        console.log(`[SEND] ⚠️ Attempting to send previously rejected move: ${move} (count: ${rejectionCount})`);
+        if (rejectionCount > 3) {
+            console.log('[SEND] ❌ Move rejected too many times, triggering recalculation');
+            lastRejectedMove = null;
+            rejectionCount = 0;
+            setTimeout(() => forceCalculation(getActiveColorFromFen(currentFen)), 200);
+            return false;
+        }
+    }
+    
     try {
+        // Mark that we're sending a move
+        botJustSentMove = true;
+        pendingMove = move;
+        
         webSocketWrapper.send(JSON.stringify({
             t: "move",
             d: { 
@@ -1264,9 +1676,31 @@ function sendMove(move) {
                 a: 1
             }
         }));
+        
+        // Update success tracking
+        lastSuccessfulMoveTime = Date.now();
+        
+        // Clear watchdog on successful send
+        clearAbsoluteWatchdog();
+        
+        // Clear calculation timeout
+        if (calculationTimeout) {
+            clearTimeout(calculationTimeout);
+            calculationTimeout = null;
+        }
+        
+        console.log(`[SEND] ✅ Move sent: ${move}`);
         return true;
     } catch (e) {
         console.error('TRANSCENDENT: Error sending move:', e);
+        botJustSentMove = false;
+        pendingMove = null;
+        
+        // Retry on error
+        if (retryCount < 2) {
+            console.log(`[SEND] Retrying after error (attempt ${retryCount + 1})`);
+            setTimeout(() => sendMove(move, retryCount + 1), 500);
+        }
         return false;
     }
 }
@@ -1274,7 +1708,7 @@ function sendMove(move) {
 // ═══════════════════════════════════════════════════════════════════════
 // ENGINE MESSAGE HANDLER - TRANSCENDENT PRECISION
 // Zero blunders, perfect evaluation tracking, strategic move selection
-// FIXED: Comprehensive null checking and fallback handling
+// FIXED: Comprehensive null checking, lock release, and fallback handling
 // ═══════════════════════════════════════════════════════════════════════
 
 function setupChessEngineOnMessage() {
@@ -1314,9 +1748,20 @@ function setupChessEngineOnMessage() {
             const moveParts = event.split(" ");
             bestMove = moveParts[1];
             
+            // Clear calculation timeout
+            if (calculationTimeout) {
+                clearTimeout(calculationTimeout);
+                calculationTimeout = null;
+            }
+            
             // FIXED: Validate bestMove from engine
             if (!bestMove || bestMove === '(none)' || bestMove.length < 4) {
                 console.error('TRANSCENDENT: Engine returned invalid bestmove:', bestMove);
+                // Release lock on error
+                calculationLock = false;
+                calculationStartTime = 0;
+                currentCalculatingColor = null;
+                console.log('[LOCK] 🔓 Calculation lock RELEASED (invalid bestmove)');
                 engineOutput = "";
                 lastDepthInfo = {};
                 return;
@@ -1346,6 +1791,12 @@ function setupChessEngineOnMessage() {
                     }
                 }
             }
+            
+            // Release calculation lock BEFORE sending move
+            calculationLock = false;
+            calculationStartTime = 0;
+            currentCalculatingColor = null;
+            console.log('[LOCK] 🔓 Calculation lock RELEASED');
             
             // FIXED: Final validation before sending
             if (finalMove && typeof finalMove === 'string' && finalMove.length >= 4) {
