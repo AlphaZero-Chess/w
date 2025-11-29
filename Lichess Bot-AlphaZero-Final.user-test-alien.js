@@ -1154,14 +1154,11 @@ function calculateMove() {
     chessEngine.postMessage("position fen " + currentFen);
     
     // TRANSCENDENT: Use different search strategies based on position type
-    if (posType === "winning-endgame" || posType === "mating") {
+    if (positionType === "winning-endgame" || positionType === "mating") {
         // Maximum depth for winning positions
         chessEngine.postMessage(`go depth ${Math.max(depth, CONFIG.endgameDepth)}`);
-    } else if (positionType === "tactical") {
-        // Deep tactical verification
-        chessEngine.postMessage(`go depth ${depth}`);
     } else {
-        // Standard search
+        // Standard search with calculated depth
         chessEngine.postMessage(`go depth ${depth}`);
     }
     
@@ -1174,15 +1171,24 @@ function calculateMove() {
  * Send move - Clean, fast, confident
  */
 function sendMove(move) {
-    webSocketWrapper.send(JSON.stringify({
-        t: "move",
-        d: { 
-            u: move, 
-            b: 1,
-            l: Math.floor(Math.random() * 12) + 6,  // Fast lag simulation
-            a: 1
-        }
-    }));
+    if (!webSocketWrapper || !move) {
+        console.error('TRANSCENDENT: Cannot send move - websocket or move invalid');
+        return;
+    }
+    
+    try {
+        webSocketWrapper.send(JSON.stringify({
+            t: "move",
+            d: { 
+                u: move, 
+                b: 1,
+                l: Math.floor(Math.random() * 12) + 6,
+                a: 1
+            }
+        }));
+    } catch (e) {
+        console.error('TRANSCENDENT: Error sending move:', e);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
