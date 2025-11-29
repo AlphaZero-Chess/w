@@ -870,26 +870,46 @@ function getBookMove(fen) {
 /**
  * TRANSCENDENT: Best move selection with blunder check and draw avoidance
  * Zero blunders, maximum conversion pressure when winning
+ * FIXED: Added comprehensive null/undefined checks to prevent silent failures
  */
 function selectBestMove(bestMove, alternatives) {
-    if (!alternatives || alternatives.length === 0) return bestMove;
+    // CRITICAL FIX: Early return with proper validation
+    if (!bestMove || typeof bestMove !== 'string' || bestMove.length < 4) {
+        // If bestMove is invalid, try to get first alternative
+        if (alternatives && alternatives.length > 0 && alternatives[0] && alternatives[0].move) {
+            return alternatives[0].move;
+        }
+        return null; // Signal that no valid move was found
+    }
     
-    const bestScore = alternatives[0] ? alternatives[0].score : 0;
+    // If no alternatives, return the best move
+    if (!alternatives || !Array.isArray(alternatives) || alternatives.length === 0) {
+        return bestMove;
+    }
+    
+    // FIXED: Safely get best score with proper null checking
+    const bestScore = (alternatives[0] && typeof alternatives[0].score === 'number') 
+        ? alternatives[0].score 
+        : 0;
     
     // TRANSCENDENT: Blunder check - verify best move isn't a blunder
     // A blunder is a move that loses significant evaluation
     if (blunderCheckHistory.length > 0) {
         const lastEval = blunderCheckHistory[blunderCheckHistory.length - 1];
-        const adjustedBest = myColor === 'w' ? bestScore : -bestScore;
-        const adjustedLast = myColor === 'w' ? lastEval : -lastEval;
-        
-        // If best move loses more than threshold, look for safer alternative
-        if (adjustedLast - adjustedBest > CONFIG.blunderThreshold && alternatives.length > 1) {
-            // Find a safer move within acceptable range
-            for (let alt of alternatives) {
-                const altAdjusted = myColor === 'w' ? alt.score : -alt.score;
-                if (adjustedLast - altAdjusted < CONFIG.blunderThreshold) {
-                    return alt.move;
+        if (typeof lastEval === 'number') {
+            const adjustedBest = myColor === 'w' ? bestScore : -bestScore;
+            const adjustedLast = myColor === 'w' ? lastEval : -lastEval;
+            
+            // If best move loses more than threshold, look for safer alternative
+            if (adjustedLast - adjustedBest > CONFIG.blunderThreshold && alternatives.length > 1) {
+                // Find a safer move within acceptable range
+                for (let alt of alternatives) {
+                    if (alt && alt.move && typeof alt.score === 'number') {
+                        const altAdjusted = myColor === 'w' ? alt.score : -alt.score;
+                        if (adjustedLast - altAdjusted < CONFIG.blunderThreshold) {
+                            return alt.move;
+                        }
+                    }
                 }
             }
         }
@@ -900,10 +920,12 @@ function selectBestMove(bestMove, alternatives) {
         // Check if any move might repeat a position
         for (let i = 0; i < alternatives.length; i++) {
             const alt = alternatives[i];
-            // Only consider alternatives within 30cp of best (tighter than before)
-            if (bestScore - alt.score < 30) {
-                // Prefer moves that don't repeat
-                return alt.move;
+            if (alt && alt.move && typeof alt.score === 'number') {
+                // Only consider alternatives within 30cp of best (tighter than before)
+                if (bestScore - alt.score < 30) {
+                    // Prefer moves that don't repeat
+                    return alt.move;
+                }
             }
         }
     }
@@ -912,45 +934,51 @@ function selectBestMove(bestMove, alternatives) {
     if (isMating && alternatives.length > 1) {
         // Check for mate scores
         for (let alt of alternatives) {
-            if (alt.score > 9000) {  // Mate score
+            if (alt && alt.move && typeof alt.score === 'number' && alt.score > 9000) {
                 return alt.move;  // Take the mating move
             }
         }
     }
     
-    // Default: play the best move
+    // Default: play the best move (already validated)
     return bestMove;
 }
 
 /**
  * Multi-PV parsing for strategic analysis
+ * FIXED: Added comprehensive null checking
  */
 function parseMultiPV(output) {
+    // FIXED: Guard against null/undefined input
+    if (!output || typeof output !== 'string') {
+        return [];
+    }
+    
     const lines = output.split('\n');
     const pvLines = [];
     
     for (let line of lines) {
-        if (line.indexOf('multipv') !== -1) {
-            const pvMatch = line.match(/pv\s+(\w+)/);
-            const scoreMatch = line.match(/score\s+cp\s+(-?\d+)/);
-            const mateMatch = line.match(/score\s+mate\s+(-?\d+)/);
-            const depthMatch = line.match(/depth\s+(\d+)/);
-            
-            if (pvMatch) {
-                let score = 0;
-                if (mateMatch) {
-                    const mateIn = parseInt(mateMatch[1]);
-                    score = mateIn > 0 ? 10000 - mateIn : -10000 - mateIn;
-                } else if (scoreMatch) {
-                    score = parseInt(scoreMatch[1]);
-                }
-                
-                pvLines.push({
-                    move: pvMatch[1],
-                    score: score,
-                    depth: depthMatch ? parseInt(depthMatch[1]) : 0
-                });
+        if (!line || line.indexOf('multipv') === -1) continue;
+        
+        const pvMatch = line.match(/pv\s+(\w+)/);
+        const scoreMatch = line.match(/score\s+cp\s+(-?\d+)/);
+        const mateMatch = line.match(/score\s+mate\s+(-?\d+)/);
+        const depthMatch = line.match(/depth\s+(\d+)/);
+        
+        if (pvMatch && pvMatch[1]) {
+            let score = 0;
+            if (mateMatch && mateMatch[1]) {
+                const mateIn = parseInt(mateMatch[1]);
+                score = mateIn > 0 ? 10000 - mateIn : -10000 - mateIn;
+            } else if (scoreMatch && scoreMatch[1]) {
+                score = parseInt(scoreMatch[1]);
             }
+            
+            pvLines.push({
+                move: pvMatch[1],
+                score: score,
+                depth: depthMatch ? parseInt(depthMatch[1]) : 0
+            });
         }
     }
     
@@ -959,8 +987,14 @@ function parseMultiPV(output) {
 
 /**
  * TRANSCENDENT: Parse evaluation with mate detection
+ * FIXED: Always returns a valid evaluation object
  */
 function parseEvaluation(output) {
+    // FIXED: Guard against null/undefined input
+    if (!output || typeof output !== 'string') {
+        return { type: 'cp', value: 0, raw: 0 };
+    }
+    
     const mateMatch = output.match(/score\s+mate\s+(-?\d+)/);
     const cpMatch = output.match(/score\s+cp\s+(-?\d+)/);
     
@@ -969,15 +1003,22 @@ function parseEvaluation(output) {
         return { type: 'mate', value: mateIn, raw: mateIn > 0 ? 10000 : -10000 };
     }
     if (cpMatch) {
-        return { type: 'cp', value: parseInt(cpMatch[1]), raw: parseInt(cpMatch[1]) };
+        const cpValue = parseInt(cpMatch[1]);
+        return { type: 'cp', value: cpValue, raw: cpValue };
     }
     return { type: 'cp', value: 0, raw: 0 };
 }
 
 /**
  * TRANSCENDENT: Update winning status with detailed tracking
+ * FIXED: Added comprehensive null checking
  */
 function updateWinningStatus(evalData) {
+    // FIXED: Guard against null/undefined evalData
+    if (!evalData || typeof evalData.raw !== 'number') {
+        return;
+    }
+    
     const evalScore = evalData.raw;
     lastMoveEval = currentEval;
     currentEval = evalScore;
@@ -1069,9 +1110,19 @@ function interceptWebSocket() {
             webSocketWrapper = wrappedWebSocket;
 
             wrappedWebSocket.addEventListener("message", function (event) {
+                // FIXED: Guard against null event data
+                if (!event || !event.data) return;
+                
+                let message;
                 try {
-                    let message = JSON.parse(event.data);
-                    
+                    message = JSON.parse(event.data);
+                } catch (e) {
+                    // Silent error handling for non-JSON messages
+                    return;
+                }
+                
+                // FIXED: Moved processing outside try-catch for better error visibility
+                try {
                     // TRANSCENDENT: Detect new game start
                     if (message.t === "crowd" || message.t === "featured" || message.t === "endData") {
                         resetGameState();
@@ -1110,7 +1161,7 @@ function interceptWebSocket() {
                         calculateMove();
                     }
                 } catch (e) {
-                    // Silent error handling for non-JSON messages
+                    console.error('TRANSCENDENT: Error processing message:', e);
                 }
             });
             
@@ -1124,14 +1175,27 @@ function interceptWebSocket() {
 // ═══════════════════════════════════════════════════════════════════════
 // MOVE CALCULATION - TRANSCENDENT STRATEGIC DEPTH
 // Deep understanding with 30+ move strategic planning
+// FIXED: Added validation checks to prevent undefined behavior
 // ═══════════════════════════════════════════════════════════════════════
 
 function calculateMove() {
+    // FIXED: Validate currentFen before proceeding
+    if (!currentFen || typeof currentFen !== 'string' || currentFen.length < 10) {
+        console.error('TRANSCENDENT: Invalid FEN position:', currentFen);
+        return;
+    }
+    
+    // FIXED: Validate engine is initialized
+    if (!chessEngine) {
+        console.error('TRANSCENDENT: Chess engine not initialized');
+        return;
+    }
+    
     // Opening book for variety and strategic preparation
     if (gamePhase === "opening" || (gamePhase === "early-middlegame" && moveCount < 12)) {
         const bookMove = getBookMove(currentFen);
         
-        if (bookMove) {
+        if (bookMove && typeof bookMove === 'string' && bookMove.length >= 4) {
             // Quick book moves - confidence in preparation
             const thinkTime = Math.random() * 150 + 100;
             
@@ -1169,11 +1233,25 @@ function calculateMove() {
 
 /**
  * Send move - Clean, fast, confident
+ * FIXED: Comprehensive validation before sending
  */
 function sendMove(move) {
-    if (!webSocketWrapper || !move) {
-        console.error('TRANSCENDENT: Cannot send move - websocket or move invalid');
-        return;
+    // CRITICAL FIX: Validate webSocketWrapper exists and is connected
+    if (!webSocketWrapper) {
+        console.error('TRANSCENDENT: Cannot send move - WebSocket not initialized');
+        return false;
+    }
+    
+    // CRITICAL FIX: Validate webSocketWrapper readyState
+    if (webSocketWrapper.readyState !== WebSocket.OPEN) {
+        console.error('TRANSCENDENT: Cannot send move - WebSocket not open (state:', webSocketWrapper.readyState, ')');
+        return false;
+    }
+    
+    // CRITICAL FIX: Validate move is a valid string
+    if (!move || typeof move !== 'string' || move.length < 4) {
+        console.error('TRANSCENDENT: Cannot send move - Invalid move:', move);
+        return false;
     }
     
     try {
@@ -1186,14 +1264,17 @@ function sendMove(move) {
                 a: 1
             }
         }));
+        return true;
     } catch (e) {
         console.error('TRANSCENDENT: Error sending move:', e);
+        return false;
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
 // ENGINE MESSAGE HANDLER - TRANSCENDENT PRECISION
 // Zero blunders, perfect evaluation tracking, strategic move selection
+// FIXED: Comprehensive null checking and fallback handling
 // ═══════════════════════════════════════════════════════════════════════
 
 function setupChessEngineOnMessage() {
@@ -1201,25 +1282,29 @@ function setupChessEngineOnMessage() {
     let lastDepthInfo = {};
     
     chessEngine.onmessage = function (event) {
+        if (!event) return; // FIXED: Guard against null events
+        
         engineOutput += event + "\n";
         
         // TRANSCENDENT: Parse evaluation for detailed status
         if (event.indexOf('score') !== -1) {
             const evalData = parseEvaluation(event);
-            updateWinningStatus(evalData);
-            
-            // Track depth info for analysis
-            const depthMatch = event.match(/depth\s+(\d+)/);
-            if (depthMatch) {
-                lastDepthInfo.depth = parseInt(depthMatch[1]);
-                lastDepthInfo.eval = evalData;
+            if (evalData) {
+                updateWinningStatus(evalData);
+                
+                // Track depth info for analysis
+                const depthMatch = event.match(/depth\s+(\d+)/);
+                if (depthMatch) {
+                    lastDepthInfo.depth = parseInt(depthMatch[1]);
+                    lastDepthInfo.eval = evalData;
+                }
             }
         }
         
         // TRANSCENDENT: Parse multi-PV for blunder checking and alternatives
         if (event.indexOf('multipv') !== -1) {
             const lines = parseMultiPV(event);
-            if (lines.length > 0) {
+            if (lines && lines.length > 0) {
                 multiPVLines = lines;
             }
         }
@@ -1229,24 +1314,46 @@ function setupChessEngineOnMessage() {
             const moveParts = event.split(" ");
             bestMove = moveParts[1];
             
+            // FIXED: Validate bestMove from engine
+            if (!bestMove || bestMove === '(none)' || bestMove.length < 4) {
+                console.error('TRANSCENDENT: Engine returned invalid bestmove:', bestMove);
+                engineOutput = "";
+                lastDepthInfo = {};
+                return;
+            }
+            
             // TRANSCENDENT: Smart move selection with blunder avoidance
             // and strategic web-weaving when winning
             let finalMove = selectBestMove(bestMove, multiPVLines);
             
+            // FIXED: Handle case where selectBestMove returns null
+            if (!finalMove) {
+                console.warn('TRANSCENDENT: selectBestMove returned null, using engine bestmove');
+                finalMove = bestMove;
+            }
+            
             // TRANSCENDENT: Final verification - never play a clearly losing move
             if (multiPVLines.length > 1 && finalMove === bestMove) {
                 const bestAlt = multiPVLines[0];
-                if (bestAlt && bestAlt.move && bestAlt.move !== finalMove) {
+                if (bestAlt && bestAlt.move && typeof bestAlt.move === 'string' && bestAlt.move !== finalMove) {
                     // If our selected move isn't the top move, verify it's acceptable
-                    const selectedLine = multiPVLines.find(l => l.move === finalMove);
-                    if (selectedLine && bestAlt.score - selectedLine.score > CONFIG.blunderThreshold) {
+                    const selectedLine = multiPVLines.find(l => l && l.move === finalMove);
+                    if (selectedLine && typeof selectedLine.score === 'number' && 
+                        typeof bestAlt.score === 'number' &&
+                        bestAlt.score - selectedLine.score > CONFIG.blunderThreshold) {
                         // Fall back to best move to avoid blunder
                         finalMove = bestAlt.move;
                     }
                 }
             }
             
-            sendMove(finalMove);
+            // FIXED: Final validation before sending
+            if (finalMove && typeof finalMove === 'string' && finalMove.length >= 4) {
+                sendMove(finalMove);
+            } else {
+                console.error('TRANSCENDENT: Final move validation failed:', finalMove);
+            }
+            
             engineOutput = "";
             lastDepthInfo = {};
         }
