@@ -1480,6 +1480,22 @@ let calculationTimeout = null;          // Safety timeout for calculation
 let messageDebounceTimer = null;        // Debounce rapid messages
 
 // ═══════════════════════════════════════════════════════════════════════════
+// MANUAL MOVE DETECTION - TIMING-BASED DISCRIMINATION (FROM BACKUP)
+// ═══════════════════════════════════════════════════════════════════════════
+
+let boardReady = false;                 // Board element ready flag
+let lastBoardMutationTime = 0;          // Timestamp when board DOM last changed
+let lastWebSocketMessageTime = 0;       // Timestamp when last WS position message arrived
+let botJustSentMove = false;            // True after we send, false after confirmation
+let boardMutationCount = 0;             // Counter to track mutation frequency
+let lastSeenPositionId = null;          // Track message.v
+let lastSeenFen = null;                 // Track FEN string
+let pendingMove = null;                 // Track move being sent
+let moveConfirmationTimer = null;       // Timer to confirm move was accepted
+let lastRejectedMove = null;            // Track last rejected move
+let rejectionCount = 0;                 // Count consecutive rejections
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ABSOLUTE WATCHDOG FUNCTIONS - BEST-OF-THE-BEST FROM BACKUP
 // These functions provide UNCONDITIONAL recovery from any stuck state
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2524,6 +2540,331 @@ const WatchdogMaster = {
         };
     }
 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MANUAL MOVE DETECTION - TIMING-BASED DISCRIMINATION (FROM BACKUP)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Analyze move timing to determine if it was manual or remote
+ * 
+ * KEY INSIGHT:
+ * - Manual moves: Board changes FIRST (drag/drop), then WebSocket message arrives
+ * - Remote moves: WebSocket message arrives FIRST, then Lichess animates board
+ */
+function analyzeMoveTiming() {
+    // Calculate time difference (positive = board changed before WS)
+    const timeDiff = lastWebSocketMessageTime - lastBoardMutationTime;
+    const boardChangedFirst = (timeDiff > 0);
+    
+    WatchdogLog.info(`Timing analysis: WS-Board diff = ${timeDiff}ms, Board first: ${boardChangedFirst}`);
+    
+    // Manual move signature:
+    // - Board mutated BEFORE WebSocket message (positive timeDiff)
+    // - Time gap is reasonable (20-400ms for human reaction + network)
+    // - Bot didn't just send a move
+    // - Board has actually changed (not initial state)
+    const isManualMove = (
+        boardChangedFirst &&           // Board mutated first
+        timeDiff >= 20 &&              // At least 20ms gap (not instantaneous)
+        timeDiff <= 400 &&             // Within 400ms window (reasonable delay)
+        !botJustSentMove &&            // Not our own move confirmation
+        lastBoardMutationTime > 0      // Board has actually changed
+    );
+    
+    if (isManualMove) {
+        WatchdogLog.info(`🖱️ MANUAL MOVE detected (board→WS: ${timeDiff}ms)`);
+        
+        // Determine which color moved based on current FEN
+        if (currentFen) {
+            const fenColor = getActiveColorFromFen(currentFen);
+            if (fenColor) {
+                const isWhite = (fenColor === 'w');
+                const colorName = isWhite ? 'White' : 'Black';
+                WatchdogLog.info(`Manual move by ${colorName} detected`);
+                
+                // Set per-color flag
+                if (isWhite) {
+                    WatchdogState.whiteHumanMovedRecently = true;
+                    // Clear and set debounce timer for White
+                    if (whiteDebounceTimer) clearTimeout(whiteDebounceTimer);
+                    whiteDebounceTimer = setTimeout(() => {
+                        WatchdogLog.info("✅ White manual move debounce cleared");
+                        WatchdogState.whiteHumanMovedRecently = false;
+                    }, 600);
+                } else {
+                    WatchdogState.blackHumanMovedRecently = true;
+                    // Clear and set debounce timer for Black
+                    if (blackDebounceTimer) clearTimeout(blackDebounceTimer);
+                    blackDebounceTimer = setTimeout(() => {
+                        WatchdogLog.info("✅ Black manual move debounce cleared");
+                        WatchdogState.blackHumanMovedRecently = false;
+                    }, 600);
+                }
+            }
+        }
+        
+        return true;
+    } else {
+        // Determine move type for logging
+        let moveType = "REMOTE";
+        if (botJustSentMove) {
+            moveType = "BOT (our move)";
+        } else if (!boardChangedFirst) {
+            moveType = "OPPONENT";
+        }
+        
+        WatchdogLog.info(`🤖 ${moveType} move (${boardChangedFirst ? 'instant' : 'WS→board'})`);
+        
+        return false;
+    }
+}
+
+/**
+ * Wait for Lichess board to be fully rendered
+ */
+function waitForBoard(callback) {
+    const checkInterval = setInterval(() => {
+        const board = document.querySelector('cg-board') || 
+                     document.querySelector('.cg-wrap') ||
+                     document.querySelector('#mainboard');
+        
+        if (board) {
+            clearInterval(checkInterval);
+            WatchdogLog.info("✅ Board element found and ready");
+            boardReady = true;
+            callback(board);
+        }
+    }, 100);
+    
+    setTimeout(() => {
+        clearInterval(checkInterval);
+        if (!boardReady) {
+            WatchdogLog.info("⚠️ Board not found after 5s, proceeding anyway");
+            boardReady = true;
+        }
+    }, 5000);
+}
+
+/**
+ * Setup MutationObserver with timing tracking
+ */
+function setupManualMoveDetection() {
+    WatchdogLog.info("Setting up timing-based move detection...");
+    
+    waitForBoard((board) => {
+        WatchdogLog.info("✅ Attaching timing observer to board");
+        
+        // Observer ONLY records timestamp - does NOT set humanMovedRecently
+        const observer = new MutationObserver((mutations) => {
+            // Record mutation timestamp
+            lastBoardMutationTime = Date.now();
+            boardMutationCount++;
+        });
+        
+        // Observe board for structural changes only
+        observer.observe(board, {
+            childList: true,      // Pieces added/removed
+            subtree: true,        // Watch SVG descendants
+            attributes: true,     // Attribute changes
+            attributeFilter: ['class'] // Only watch class changes (piece moves)
+        });
+        
+        WatchdogLog.info("✅ Timing-based move detection ACTIVE");
+    });
+}
+
+/**
+ * Schedule calculation with per-color tracking - DEADLOCK-PROOF
+ */
+function scheduleCalculate() {
+    WatchdogLog.info("scheduleCalculate() called");
+    
+    // Check if board is ready
+    if (!boardReady) {
+        WatchdogLog.info("❌ Board not ready yet");
+        return;
+    }
+    
+    // Get current active color from FEN
+    if (!currentFen) {
+        WatchdogLog.info("❌ No current FEN");
+        return;
+    }
+    
+    const fenActiveColor = getActiveColorFromFen(currentFen);
+    if (!fenActiveColor) {
+        WatchdogLog.info("❌ Cannot determine active color");
+        return;
+    }
+    
+    const isWhite = (fenActiveColor === 'w');
+    const colorName = isWhite ? 'White' : 'Black';
+    
+    WatchdogLog.info(`  Color: ${colorName}, Lock: ${WatchdogState.calculationLock}`);
+    
+    // Safety checks before calculation
+    if (WatchdogState.calculationLock) {
+        WatchdogLog.info(`❌ Calculation already in progress for ${WatchdogState.currentCalculatingColor === 'w' ? 'White' : 'Black'}`);
+        return;
+    }
+    
+    // Check per-color flags
+    const humanMovedRecently = isWhite ? WatchdogState.whiteHumanMovedRecently : WatchdogState.blackHumanMovedRecently;
+    const positionReady = isWhite ? WatchdogState.whitePositionReady : WatchdogState.blackPositionReady;
+    
+    if (humanMovedRecently) {
+        WatchdogLog.info(`❌ ${colorName} human move detected recently, waiting for debounce`);
+        return;
+    }
+    
+    if (!webSocketWrapper || webSocketWrapper.readyState !== 1) {
+        WatchdogLog.info("❌ WebSocket not ready");
+        return;
+    }
+    
+    if (!positionReady) {
+        WatchdogLog.info(`❌ ${colorName} position not ready`);
+        return;
+    }
+    
+    WatchdogLog.info(`✅ All checks passed for ${colorName}, proceeding to calculateMove()`);
+    
+    // Set current calculating color
+    WatchdogState.currentCalculatingColor = fenActiveColor;
+    
+    // Start absolute watchdog timer
+    startAbsoluteWatchdog();
+    
+    calculateMove();
+}
+
+/**
+ * Handle incoming WebSocket position messages with race-condition-free logic
+ */
+function handlePositionMessage(message) {
+    if (!message.d || typeof message.d.fen !== "string" || typeof message.v !== "number") {
+        return; // Not a position message
+    }
+    
+    // NEW: Don't process messages until board is ready
+    if (!boardReady) {
+        WatchdogLog.info("⏳ Board not ready, queueing message");
+        setTimeout(() => handlePositionMessage(message), 100);
+        return;
+    }
+    
+    // Extract position data
+    const positionBoard = message.d.fen;
+    const currentWsV = message.v;
+    
+    // Record WebSocket message timestamp
+    lastWebSocketMessageTime = Date.now();
+    
+    // Clear bot move flag after receiving position update
+    if (botJustSentMove) {
+        WatchdogLog.info("✅ Bot move confirmed by server, clearing flag");
+        botJustSentMove = false;
+        
+        // Clear move confirmation timer since move was accepted
+        if (moveConfirmationTimer) {
+            clearTimeout(moveConfirmationTimer);
+            moveConfirmationTimer = null;
+        }
+        
+        // Reset rejection tracking on successful move
+        lastRejectedMove = null;
+        rejectionCount = 0;
+    }
+    
+    // Analyze timing to determine move type (manual vs remote)
+    analyzeMoveTiming();
+    
+    WatchdogLog.info(`Message received: v=${currentWsV}`);
+    
+    // Construct full FEN with turn info from message.v
+    let fullFen = positionBoard;
+    
+    // Check if FEN already includes turn info
+    if (positionBoard.split(' ').length < 2) {
+        const isWhitesTurn = (currentWsV % 2 === 0);
+        const turnColor = isWhitesTurn ? 'w' : 'b';
+        fullFen = `${positionBoard} ${turnColor}`;
+    }
+    
+    // Extract authoritative turn color from FEN
+    const fenActiveColor = getActiveColorFromFen(fullFen);
+    
+    if (!fenActiveColor) {
+        WatchdogLog.warn("⚠️ Could not extract active color from FEN");
+        return;
+    }
+    
+    const isWhite = (fenActiveColor === 'w');
+    const colorName = isWhite ? 'White' : 'Black';
+    
+    // Update current position
+    currentFen = fullFen;
+    myColor = fenActiveColor;
+    moveCount = Math.floor((currentWsV + 1) / 2);
+    
+    // SUPERHUMAN: Track position for repetition
+    trackPosition(currentFen);
+    
+    // SUPERHUMAN: Enhanced game phase detection
+    gamePhase = getGamePhase(moveCount, currentFen);
+    positionType = analyzePositionType(currentFen);
+    
+    // SUPERHUMAN: Detect endgame type for technique
+    if (gamePhase === "endgame") {
+        detectEndgameType(currentFen);
+    }
+    
+    // SUPERHUMAN: Adjust contempt based on winning status
+    adjustContempt();
+    
+    WatchdogLog.info(`Move #${moveCount} ${gamePhase} ${colorName} to move`);
+    
+    // Check if this is a new position (version increased)
+    const isNewPosition = (lastSeenPositionId === null || currentWsV > lastSeenPositionId);
+    
+    if (!isNewPosition) {
+        WatchdogLog.info("⏸️ Same position (v unchanged), skipping");
+        return;
+    }
+    
+    // Update last seen state
+    lastSeenPositionId = currentWsV;
+    lastSeenFen = fullFen;
+    
+    // ═══════════════════════════════════════════════════════════════
+    // PER-COLOR POSITION TRACKING - DEADLOCK-PROOF
+    // ═══════════════════════════════════════════════════════════════
+    
+    WatchdogLog.info(`🎯 New position for ${colorName}`);
+    
+    // Mark position as ready for this specific color
+    const now = Date.now();
+    if (isWhite) {
+        WatchdogState.whitePositionReady = true;
+        WatchdogState.lastWhitePositionTime = now;
+        WatchdogLog.info("✅ White position marked ready");
+    } else {
+        WatchdogState.blackPositionReady = true;
+        WatchdogState.lastBlackPositionTime = now;
+        WatchdogLog.info("✅ Black position marked ready");
+    }
+    
+    // Clear any existing debounce timer
+    if (messageDebounceTimer) {
+        clearTimeout(messageDebounceTimer);
+    }
+    
+    // Debounce: wait a bit in case more messages arrive rapidly
+    messageDebounceTimer = setTimeout(() => {
+        scheduleCalculate();
+    }, 150);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INTEGRATION HOOKS - Connect watchdog to existing bot functions
