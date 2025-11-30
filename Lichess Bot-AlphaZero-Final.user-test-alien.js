@@ -16,24 +16,24 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 const CONFIG = {
-    // SMART Depths - Efficient, not bruteforce (AlphaZero uses pattern recognition, not raw depth)
-    baseDepth: 16,
-    tacticalDepth: 20,
-    positionalDepth: 18,
-    endgameDepth: 20,
-    openingDepth: 14,
-    winningDepth: 14,      // Lower depth when clearly winning (efficiency)
-    criticalDepth: 22,     // Max depth for critical moments
-    conversionDepth: 18,   // ALIEN: Special depth for converting advantages
+    // SMART Depths - FAST like stable version, efficient not bruteforce
+    baseDepth: 12,          // Was 16, restored to fast
+    tacticalDepth: 14,      // Was 20, restored to fast  
+    positionalDepth: 13,    // Was 18, restored to fast
+    endgameDepth: 14,       // Was 20, restored to fast
+    openingDepth: 10,       // Was 14, restored to fast
+    winningDepth: 11,       // Was 14, restored to fast (efficiency when winning)
+    criticalDepth: 16,      // Was 22, restored to fast
+    conversionDepth: 13,    // Was 18, restored to fast
     
     // NO mistakes - Pure engine perfection
     humanMistakeRate: 0,
     
-    // Timing - Fast and efficient
+    // Timing - Fast and efficient (RESTORED from stable)
     thinkingTimeMin: 80,
-    thinkingTimeMax: 600,
+    thinkingTimeMax: 400,   // Reduced for faster play
     
-    // Speed multipliers - Quick decisive play
+    // Speed multipliers - Quick decisive play (keep same)
     openingSpeed: 0.25,
     earlyMidSpeed: 0.5,
     middlegameSpeed: 0.6,
