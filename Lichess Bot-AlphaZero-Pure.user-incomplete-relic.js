@@ -45,7 +45,7 @@ const CONFIG = {
     thinkingTimeMin: 500,       // 0.5 seconds minimum
     thinkingTimeMax: 3500,      // 3.5 seconds maximum (deep strategy)
     premoveTime: 300,           // 0.3s for premoves
-    humanMistakeRate: 0.0,    // 1.5% (superhuman accuracy)
+    humanMistakeRate: 0.015,    // 1.5% (superhuman accuracy)
     
     // Deep strategic search
     baseDepth: 14,              // Base search depth (deeper)
