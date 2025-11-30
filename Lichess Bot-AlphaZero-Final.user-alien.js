@@ -1291,17 +1291,25 @@ setupChessEngineOnMessage();
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ROBUST COMPLEX WATCHDOG SYSTEM - PREVENTS BOT FROM STOPPING ENTIRELY
-// Multi-layered self-healing architecture with circuit breakers
+// Multi-layered self-healing architecture with ABSOLUTE recalculation watchdog
+// Best-of-the-best implementation from AlphaZero-Pure-being override
 // ═══════════════════════════════════════════════════════════════════════════
 
 const WatchdogConfig = {
-    // Core timing intervals
+    // Core timing intervals - TUNED FOR STABILITY
     heartbeatInterval: 2000,           // Health check every 2s
-    engineTimeoutThreshold: 15000,     // Engine response timeout 15s
+    engineTimeoutThreshold: 8000,      // Engine response timeout 8s (was 15s - faster recovery)
     wsReconnectDelay: 1000,            // WebSocket reconnect delay
     wsMaxReconnectAttempts: 10,        // Max reconnection attempts
-    moveTimeoutThreshold: 20000,       // Move calculation timeout 20s
-    staleStateThreshold: 30000,        // Stale state detection 30s
+    moveTimeoutThreshold: 8000,        // Move calculation timeout 8s (was 20s - faster recovery)
+    staleStateThreshold: 20000,        // Stale state detection 20s (was 30s)
+    
+    // ABSOLUTE WATCHDOG - UNCONDITIONAL OVERRIDE (FROM BACKUP)
+    absoluteWatchdogTimeout: 8000,     // 8-second absolute timeout - overrides everything
+    calculationStuckTimeout: 5000,     // 5-second stuck calculation timeout
+    positionReadyTimeout: 3000,        // 3-second position ready but no calc started
+    noMoveTimeout: 20000,              // 20-second no successful move timeout
+    debounceStaleTimeout: 2000,        // 2-second stale debounce flag timeout
     
     // Circuit breaker settings
     failureThreshold: 3,               // Failures before circuit opens
@@ -1311,10 +1319,12 @@ const WatchdogConfig = {
     maxRecoveryAttempts: 5,            // Max recovery attempts per component
     recoveryBackoffMultiplier: 1.5,    // Exponential backoff multiplier
     fullResetThreshold: 3,             // Full resets before giving up
+    forceCalculationDelay: 100,        // Delay before force calculation
+    recoveryCalculationDelay: 500,     // Delay before recovery calculation
     
     // Monitoring
-    enableDetailedLogging: false,       // Verbose logging (set true for debug)
-    enableHealthMetrics: true           // Track health metrics
+    enableDetailedLogging: false,      // Verbose logging (set true for debug)
+    enableHealthMetrics: true          // Track health metrics
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1362,7 +1372,29 @@ const WatchdogState = {
         wsReconnections: 0,
         recoveries: 0,
         uptime: Date.now()
-    }
+    },
+    
+    // ═══════════════════════════════════════════════════════════════════════
+    // ABSOLUTE WATCHDOG STATE - FROM BACKUP (BEST-OF-THE-BEST)
+    // Per-color position tracking for deadlock-proof operation
+    // ═══════════════════════════════════════════════════════════════════════
+    
+    // Position ready tracking - PER COLOR (prevents deadlocks)
+    whitePositionReady: false,
+    blackPositionReady: false,
+    lastWhitePositionTime: 0,
+    lastBlackPositionTime: 0,
+    
+    // Manual move detection - PER COLOR
+    whiteHumanMovedRecently: false,
+    blackHumanMovedRecently: false,
+    
+    // Move tracking
+    lastSuccessfulMoveTime: Date.now(),
+    lastSeenPositionId: null,
+    currentCalculatingColor: null,
+    calculationStartTime: 0,
+    calculationLock: false
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1434,6 +1466,256 @@ const CircuitBreaker = {
         }
     }
 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ABSOLUTE WATCHDOG TIMERS - UNCONDITIONAL OVERRIDE (FROM BACKUP)
+// These are the critical timers that ensure the bot NEVER stops
+// ═══════════════════════════════════════════════════════════════════════════
+
+let absoluteWatchdogTimer = null;       // ABSOLUTE watchdog - overrides everything
+let healthCheckInterval = null;         // Periodic health check interval
+let whiteDebounceTimer = null;          // White's debounce timer
+let blackDebounceTimer = null;          // Black's debounce timer
+let calculationTimeout = null;          // Safety timeout for calculation
+let messageDebounceTimer = null;        // Debounce rapid messages
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ABSOLUTE WATCHDOG FUNCTIONS - BEST-OF-THE-BEST FROM BACKUP
+// These functions provide UNCONDITIONAL recovery from any stuck state
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Get active color from FEN string
+ */
+function getActiveColorFromFen(fen) {
+    if (!fen) return null;
+    const parts = fen.split(' ');
+    if (parts.length >= 2) {
+        return parts[1]; // 'w' or 'b'
+    }
+    return null;
+}
+
+/**
+ * Force unlock all locks and reset state - UNCONDITIONAL
+ * This is the nuclear option - clears EVERYTHING
+ */
+function forceUnlockAndReset(reason) {
+    WatchdogLog.recovery(`💥 FORCE UNLOCK - Reason: ${reason}`);
+    WatchdogLog.recovery(`  Before: calculationLock=${WatchdogState.calculationLock}, whiteReady=${WatchdogState.whitePositionReady}, blackReady=${WatchdogState.blackPositionReady}`);
+    
+    // Clear ALL locks unconditionally
+    WatchdogState.calculationLock = false;
+    WatchdogState.calculationStartTime = 0;
+    WatchdogState.currentCalculatingColor = null;
+    WatchdogState.calculatingMove = false;
+    WatchdogState.pendingEngineCommand = false;
+    
+    // Clear all timers
+    if (calculationTimeout) {
+        clearTimeout(calculationTimeout);
+        calculationTimeout = null;
+    }
+    if (messageDebounceTimer) {
+        clearTimeout(messageDebounceTimer);
+        messageDebounceTimer = null;
+    }
+    if (absoluteWatchdogTimer) {
+        clearTimeout(absoluteWatchdogTimer);
+        absoluteWatchdogTimer = null;
+    }
+    
+    // Stop engine if needed
+    if (chessEngine) {
+        try {
+            chessEngine.postMessage("stop");
+        } catch (e) {
+            WatchdogLog.error(`Failed to stop engine: ${e.message}`);
+        }
+    }
+    
+    WatchdogState.totalRecoveries++;
+    WatchdogState.metrics.recoveries++;
+    
+    WatchdogLog.recovery(`  After: All locks cleared, state reset`);
+}
+
+/**
+ * Force calculation to start - bypasses all normal checks
+ * This is used when we detect a stuck state and need to force progress
+ */
+function forceCalculation(colorToCalculate) {
+    WatchdogLog.recovery(`⚡ FORCE CALCULATION for ${colorToCalculate === 'w' ? 'White' : 'Black'}`);
+    
+    if (!currentFen || !chessEngine || !webSocketWrapper || webSocketWrapper.readyState !== 1) {
+        WatchdogLog.warn("❌ Cannot force calculation - missing prerequisites");
+        return;
+    }
+    
+    // Verify FEN color matches
+    const fenColor = getActiveColorFromFen(currentFen);
+    if (fenColor !== colorToCalculate) {
+        WatchdogLog.warn(`❌ Color mismatch: want ${colorToCalculate}, FEN has ${fenColor}`);
+        return;
+    }
+    
+    // Force unlock first
+    forceUnlockAndReset("forced calculation");
+    
+    // Set position as ready
+    if (colorToCalculate === 'w') {
+        WatchdogState.whitePositionReady = true;
+        WatchdogState.lastWhitePositionTime = Date.now();
+    } else {
+        WatchdogState.blackPositionReady = true;
+        WatchdogState.lastBlackPositionTime = Date.now();
+    }
+    
+    // Immediately call calculateMove
+    setTimeout(() => {
+        try {
+            calculateMove();
+        } catch (e) {
+            WatchdogLog.error(`Force calculation failed: ${e.message}`);
+        }
+    }, WatchdogConfig.forceCalculationDelay);
+}
+
+/**
+ * Start absolute watchdog - overrides everything after timeout
+ * This is the LAST LINE OF DEFENSE against bot stopping
+ */
+function startAbsoluteWatchdog() {
+    // Clear any existing watchdog
+    if (absoluteWatchdogTimer) {
+        clearTimeout(absoluteWatchdogTimer);
+    }
+    
+    // Set 8-second absolute timeout
+    absoluteWatchdogTimer = setTimeout(() => {
+        const now = Date.now();
+        const calcDuration = WatchdogState.calculationStartTime > 0 ? now - WatchdogState.calculationStartTime : 0;
+        
+        WatchdogLog.critical("🚨 ABSOLUTE WATCHDOG TRIGGERED (8s)");
+        WatchdogLog.critical(`  calculationLock: ${WatchdogState.calculationLock}`);
+        WatchdogLog.critical(`  Calculation duration: ${calcDuration}ms`);
+        WatchdogLog.critical(`  Current FEN: ${currentFen}`);
+        
+        // UNCONDITIONALLY force unlock and reset
+        forceUnlockAndReset("absolute watchdog timeout");
+        
+        // If we have a FEN and WebSocket, try to recover
+        if (currentFen && webSocketWrapper && webSocketWrapper.readyState === 1) {
+            const fenActiveColor = getActiveColorFromFen(currentFen);
+            if (fenActiveColor) {
+                WatchdogLog.recovery(`✅ Attempting recovery for ${fenActiveColor === 'w' ? 'White' : 'Black'}`);
+                setTimeout(() => forceCalculation(fenActiveColor), WatchdogConfig.recoveryCalculationDelay);
+            }
+        }
+    }, WatchdogConfig.absoluteWatchdogTimeout);
+    
+    WatchdogLog.info("⏰ Absolute watchdog started (8s timeout)");
+}
+
+/**
+ * Clear absolute watchdog (called when move is successfully sent)
+ */
+function clearAbsoluteWatchdog() {
+    if (absoluteWatchdogTimer) {
+        clearTimeout(absoluteWatchdogTimer);
+        absoluteWatchdogTimer = null;
+        WatchdogLog.info("✅ Absolute watchdog cleared");
+    }
+}
+
+/**
+ * HEALTH CHECK SYSTEM - Runs every 2 seconds and forces action if stuck
+ * This is the ABSOLUTE safety net - no conditions, just action
+ * FROM BACKUP - This is the most critical component
+ */
+function startHealthCheckSystem() {
+    if (healthCheckInterval) {
+        clearInterval(healthCheckInterval);
+    }
+    
+    healthCheckInterval = setInterval(() => {
+        const now = Date.now();
+        
+        // Check 1: Calculation running too long (> 5 seconds)
+        if (WatchdogState.calculationLock && WatchdogState.calculationStartTime > 0) {
+            const calcDuration = now - WatchdogState.calculationStartTime;
+            if (calcDuration > WatchdogConfig.calculationStuckTimeout) {
+                WatchdogLog.critical(`🚨 CRITICAL: Calculation stuck for ${calcDuration}ms - FORCING UNLOCK`);
+                forceUnlockAndReset("calculation timeout");
+                return;
+            }
+        }
+        
+        // Check 2: Position ready but no calculation started (> 3 seconds)
+        if (!WatchdogState.calculationLock && currentFen && webSocketWrapper && webSocketWrapper.readyState === 1) {
+            const fenActiveColor = getActiveColorFromFen(currentFen);
+            if (fenActiveColor) {
+                const isWhite = (fenActiveColor === 'w');
+                const positionReady = isWhite ? WatchdogState.whitePositionReady : WatchdogState.blackPositionReady;
+                const positionTime = isWhite ? WatchdogState.lastWhitePositionTime : WatchdogState.lastBlackPositionTime;
+                const humanMoved = isWhite ? WatchdogState.whiteHumanMovedRecently : WatchdogState.blackHumanMovedRecently;
+                
+                if (positionReady && positionTime > 0) {
+                    const waitDuration = now - positionTime;
+                    if (waitDuration > WatchdogConfig.positionReadyTimeout && !humanMoved) {
+                        WatchdogLog.critical(`🚨 CRITICAL: Position ready for ${waitDuration}ms but no calculation - FORCING START`);
+                        forceCalculation(fenActiveColor);
+                        return;
+                    }
+                }
+            }
+        }
+        
+        // Check 3: No successful move in last 20 seconds (game active)
+        if (WatchdogState.lastSuccessfulMoveTime > 0 && currentFen && webSocketWrapper && webSocketWrapper.readyState === 1) {
+            const timeSinceLastMove = now - WatchdogState.lastSuccessfulMoveTime;
+            if (timeSinceLastMove > WatchdogConfig.noMoveTimeout) {
+                WatchdogLog.critical(`🚨 CRITICAL: No move sent in ${timeSinceLastMove}ms - FORCING RESET`);
+                forceUnlockAndReset("no recent moves");
+                const fenActiveColor = getActiveColorFromFen(currentFen);
+                if (fenActiveColor) {
+                    forceCalculation(fenActiveColor);
+                }
+                return;
+            }
+        }
+        
+        // Check 4: Clear stale debounce flags (> 2 seconds old)
+        if (WatchdogState.whiteHumanMovedRecently && WatchdogState.lastWhitePositionTime > 0 && now - WatchdogState.lastWhitePositionTime > WatchdogConfig.debounceStaleTimeout) {
+            WatchdogLog.info("🔧 Clearing stale White debounce flag");
+            WatchdogState.whiteHumanMovedRecently = false;
+            if (whiteDebounceTimer) {
+                clearTimeout(whiteDebounceTimer);
+                whiteDebounceTimer = null;
+            }
+        }
+        if (WatchdogState.blackHumanMovedRecently && WatchdogState.lastBlackPositionTime > 0 && now - WatchdogState.lastBlackPositionTime > WatchdogConfig.debounceStaleTimeout) {
+            WatchdogLog.info("🔧 Clearing stale Black debounce flag");
+            WatchdogState.blackHumanMovedRecently = false;
+            if (blackDebounceTimer) {
+                clearTimeout(blackDebounceTimer);
+                blackDebounceTimer = null;
+            }
+        }
+        
+        // Check 5: Engine health - if pending command for too long
+        if (WatchdogState.pendingEngineCommand) {
+            const timeSinceCommand = now - WatchdogState.lastEngineResponse;
+            if (timeSinceCommand > WatchdogConfig.engineTimeoutThreshold) {
+                WatchdogLog.warn(`🚨 Engine command pending for ${timeSinceCommand}ms - recovering`);
+                EngineWatchdog.recoverEngine();
+            }
+        }
+        
+    }, WatchdogConfig.heartbeatInterval);
+    
+    WatchdogLog.info("✅ Health check system started (2s interval)");
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WATCHDOG LOGGING - Centralized logging with levels
@@ -2153,6 +2435,7 @@ const ErrorBoundary = {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WATCHDOG MASTER CONTROLLER - Coordinates all watchdog components
+// Enhanced with ABSOLUTE watchdog from backup for maximum stability
 // ═══════════════════════════════════════════════════════════════════════════
 
 const WatchdogMaster = {
@@ -2178,16 +2461,23 @@ const WatchdogMaster = {
         MoveCalculationWatchdog.start();
         HeartbeatSystem.start();
         
+        // START CRITICAL: ABSOLUTE WATCHDOG HEALTH CHECK SYSTEM (FROM BACKUP)
+        // This is the BEST-OF-THE-BEST recalculation watchdog
+        startHealthCheckSystem();
+        
         this.initialized = true;
         
         WatchdogLog.info("═══════════════════════════════════════════════════════");
-        WatchdogLog.info("  WATCHDOG SYSTEM FULLY OPERATIONAL");
+        WatchdogLog.info("  WATCHDOG SYSTEM FULLY OPERATIONAL - ABSOLUTE MODE");
         WatchdogLog.info("  • Engine monitoring: ACTIVE");
         WatchdogLog.info("  • WebSocket monitoring: ACTIVE");
         WatchdogLog.info("  • Move calculation monitoring: ACTIVE");
         WatchdogLog.info("  • Heartbeat system: ACTIVE");
         WatchdogLog.info("  • Circuit breakers: READY");
         WatchdogLog.info("  • Error boundary: ACTIVE");
+        WatchdogLog.info("  • ABSOLUTE WATCHDOG: ACTIVE (8s timeout)");
+        WatchdogLog.info("  • HEALTH CHECK SYSTEM: ACTIVE (2s interval)");
+        WatchdogLog.info("  • PER-COLOR TRACKING: ACTIVE (deadlock-proof)");
         WatchdogLog.info("═══════════════════════════════════════════════════════");
     },
     
@@ -2202,6 +2492,13 @@ const WatchdogMaster = {
         MoveCalculationWatchdog.stop();
         HeartbeatSystem.stop();
         
+        // Clear absolute watchdog timers
+        if (healthCheckInterval) {
+            clearInterval(healthCheckInterval);
+            healthCheckInterval = null;
+        }
+        clearAbsoluteWatchdog();
+        
         this.initialized = false;
     },
     
@@ -2213,6 +2510,10 @@ const WatchdogMaster = {
             systemHealthy: WatchdogState.systemHealthy,
             engineAlive: WatchdogState.engineAlive,
             wsAlive: WatchdogState.wsAlive,
+            calculationLock: WatchdogState.calculationLock,
+            whitePositionReady: WatchdogState.whitePositionReady,
+            blackPositionReady: WatchdogState.blackPositionReady,
+            lastSuccessfulMove: Date.now() - WatchdogState.lastSuccessfulMoveTime,
             circuits: {
                 engine: !CircuitBreaker.isOpen('engine'),
                 websocket: !CircuitBreaker.isOpen('websocket'),
@@ -2226,28 +2527,55 @@ const WatchdogMaster = {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // INTEGRATION HOOKS - Connect watchdog to existing bot functions
+// Enhanced with ABSOLUTE watchdog integration for guaranteed stability
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Store original functions
 const _originalCalculateMove = calculateMove;
 const _originalSendMove = sendMove;
 
-// Override calculateMove with watchdog integration
+// Override calculateMove with watchdog integration + ABSOLUTE WATCHDOG
 calculateMove = function() {
     try {
+        // CRITICAL: Start absolute watchdog timer
+        startAbsoluteWatchdog();
+        
+        // Set calculation lock state
+        WatchdogState.calculationLock = true;
+        WatchdogState.calculationStartTime = Date.now();
+        
         MoveCalculationWatchdog.markCalculationStart();
         EngineWatchdog.markPendingCommand();
         
         _originalCalculateMove.apply(this, arguments);
     } catch (e) {
         WatchdogLog.error(`calculateMove error: ${e.message}`);
+        forceUnlockAndReset("calculateMove exception");
         MoveCalculationWatchdog.recoverMoveCalculation();
     }
 };
 
-// Override sendMove with watchdog integration
+// Override sendMove with watchdog integration + ABSOLUTE WATCHDOG
 sendMove = function(move) {
     try {
+        // CRITICAL: Clear absolute watchdog - move successfully sent
+        clearAbsoluteWatchdog();
+        
+        // Update successful move time
+        WatchdogState.lastSuccessfulMoveTime = Date.now();
+        
+        // Clear calculation lock
+        WatchdogState.calculationLock = false;
+        WatchdogState.calculationStartTime = 0;
+        
+        // Clear position ready flags for current color
+        const fenActiveColor = getActiveColorFromFen(currentFen);
+        if (fenActiveColor === 'w') {
+            WatchdogState.whitePositionReady = false;
+        } else {
+            WatchdogState.blackPositionReady = false;
+        }
+        
         MoveCalculationWatchdog.markCalculationComplete();
         
         _originalSendMove.apply(this, arguments);
