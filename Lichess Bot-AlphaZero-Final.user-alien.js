@@ -2676,6 +2676,8 @@ function setupManualMoveDetection() {
 
 /**
  * Schedule calculation with per-color tracking - DEADLOCK-PROOF
+ * This function validates that calculation should proceed, then delegates to calculateMove()
+ * The calculateMove override handles the actual lock management and watchdog timers
  */
 function scheduleCalculate() {
     WatchdogLog.info("scheduleCalculate() called");
@@ -2702,6 +2704,8 @@ function scheduleCalculate() {
     const colorName = isWhite ? 'White' : 'Black';
     
     WatchdogLog.info(`  Color: ${colorName}, Lock: ${WatchdogState.calculationLock}`);
+    WatchdogLog.info(`  ${colorName} position ready: ${isWhite ? WatchdogState.whitePositionReady : WatchdogState.blackPositionReady}`);
+    WatchdogLog.info(`  ${colorName} human moved recently: ${isWhite ? WatchdogState.whiteHumanMovedRecently : WatchdogState.blackHumanMovedRecently}`);
     
     // Safety checks before calculation
     if (WatchdogState.calculationLock) {
@@ -2730,12 +2734,7 @@ function scheduleCalculate() {
     
     WatchdogLog.info(`✅ All checks passed for ${colorName}, proceeding to calculateMove()`);
     
-    // Set current calculating color
-    WatchdogState.currentCalculatingColor = fenActiveColor;
-    
-    // Start absolute watchdog timer
-    startAbsoluteWatchdog();
-    
+    // DELEGATE to calculateMove - it handles lock management and watchdog timers
     calculateMove();
 }
 
@@ -2878,12 +2877,62 @@ const _originalSendMove = sendMove;
 // Override calculateMove with watchdog integration + ABSOLUTE WATCHDOG
 calculateMove = function() {
     try {
+        // Safety checks
+        if (!chessEngine) {
+            WatchdogLog.warn("❌ Engine not initialized");
+            return;
+        }
+        
+        if (!currentFen) {
+            WatchdogLog.warn("❌ No FEN position");
+            return;
+        }
+        
+        if (WatchdogState.calculationLock) {
+            WatchdogLog.info(`❌ Already calculating for ${WatchdogState.currentCalculatingColor === 'w' ? 'White' : 'Black'}`);
+            return;
+        }
+        
+        if (!webSocketWrapper || webSocketWrapper.readyState !== 1) {
+            WatchdogLog.warn("❌ WebSocket not ready");
+            return;
+        }
+        
+        // Check for excessive rejections - reset and add randomness
+        if (rejectionCount > 5) {
+            WatchdogLog.warn(`⚠️ Too many rejections (${rejectionCount}) - forcing full reset`);
+            lastRejectedMove = null;
+            rejectionCount = 0;
+            setTimeout(() => calculateMove(), Math.random() * 500 + 200);
+            return;
+        }
+        
+        // Extract active color from FEN to know which side to play
+        const fenActiveColor = getActiveColorFromFen(currentFen);
+        if (!fenActiveColor) {
+            WatchdogLog.warn("❌ Cannot extract active color from FEN");
+            return;
+        }
+        
+        const isWhite = (fenActiveColor === 'w');
+        const colorName = isWhite ? 'White' : 'Black';
+        
         // CRITICAL: Start absolute watchdog timer
         startAbsoluteWatchdog();
         
-        // Set calculation lock state
+        // Set calculation lock state and track color
         WatchdogState.calculationLock = true;
         WatchdogState.calculationStartTime = Date.now();
+        WatchdogState.currentCalculatingColor = fenActiveColor;
+        
+        // Clear position ready flag for this color (we're now calculating)
+        if (isWhite) {
+            WatchdogState.whitePositionReady = false;
+        } else {
+            WatchdogState.blackPositionReady = false;
+        }
+        
+        WatchdogLog.info(`🎯 Starting calculation for ${colorName}`);
         
         MoveCalculationWatchdog.markCalculationStart();
         EngineWatchdog.markPendingCommand();
@@ -2905,9 +2954,10 @@ sendMove = function(move) {
         // Update successful move time
         WatchdogState.lastSuccessfulMoveTime = Date.now();
         
-        // Clear calculation lock
+        // Clear calculation lock and current calculating color
         WatchdogState.calculationLock = false;
         WatchdogState.calculationStartTime = 0;
+        WatchdogState.currentCalculatingColor = null;
         
         // Clear position ready flags for current color
         const fenActiveColor = getActiveColorFromFen(currentFen);
@@ -2917,7 +2967,24 @@ sendMove = function(move) {
             WatchdogState.blackPositionReady = false;
         }
         
+        // Track pending move for rejection detection
+        pendingMove = move;
+        botJustSentMove = true;
+        
+        // Set move confirmation timer - if no confirmation in 3s, assume rejected
+        if (moveConfirmationTimer) {
+            clearTimeout(moveConfirmationTimer);
+        }
+        moveConfirmationTimer = setTimeout(() => {
+            if (botJustSentMove) {
+                WatchdogLog.warn(`⚠️ Move '${move}' not confirmed after 3s, may have been rejected`);
+                botJustSentMove = false;
+            }
+        }, 3000);
+        
         MoveCalculationWatchdog.markCalculationComplete();
+        
+        WatchdogLog.info(`📤 Sending move: ${move}`);
         
         _originalSendMove.apply(this, arguments);
     } catch (e) {
@@ -2996,6 +3063,155 @@ setupChessEngineOnMessage = function() {
     };
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ENHANCED WEBSOCKET INTERCEPTION - FULLY INTEGRATED WITH WATCHDOG
+// Uses handlePositionMessage for proper per-color tracking and deadlock prevention
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Setup WebSocket event handlers - CRITICAL for proper operation
+ * This function sets up all WebSocket listeners with full watchdog integration
+ */
+function setupWebSocketHandlers(wrappedWebSocket) {
+    // Connection opened
+    wrappedWebSocket.addEventListener("open", function () {
+        WatchdogLog.info("✅ WebSocket CONNECTED");
+        WatchdogState.wsAlive = true;
+        WatchdogState.wsRecoveryAttempts = 0;
+        CircuitBreaker.recordSuccess('websocket');
+        
+        // After reconnection, wait for fresh position data
+        WatchdogLog.info("⏳ Waiting for fresh position update...");
+    });
+    
+    // Connection closed
+    wrappedWebSocket.addEventListener("close", function (event) {
+        WatchdogLog.warn(`WebSocket closed: code=${event.code}, reason=${event.reason}`);
+        WatchdogState.wsAlive = false;
+        
+        // Force reset all state
+        forceUnlockAndReset("websocket closed");
+        
+        // Clear per-color state on error close
+        if (event.code === 1011 || event.reason === "unexpected message") {
+            WatchdogLog.warn("⚠️ Error close detected - full state reset");
+            currentFen = "";
+            lastSeenPositionId = null;
+            lastSeenFen = null;
+            WatchdogState.whitePositionReady = false;
+            WatchdogState.blackPositionReady = false;
+            WatchdogState.whiteHumanMovedRecently = false;
+            WatchdogState.blackHumanMovedRecently = false;
+        }
+    });
+    
+    // Connection error
+    wrappedWebSocket.addEventListener("error", function (error) {
+        WatchdogLog.error("WebSocket ERROR occurred");
+        WatchdogState.wsAlive = false;
+        CircuitBreaker.recordFailure('websocket');
+        
+        // Force reset all state
+        forceUnlockAndReset("websocket error");
+        
+        // Clear per-color state
+        WatchdogState.whitePositionReady = false;
+        WatchdogState.blackPositionReady = false;
+    });
+    
+    // Incoming messages - CRITICAL: Routes through handlePositionMessage for proper tracking
+    wrappedWebSocket.addEventListener("message", function (event) {
+        try {
+            // Watchdog: Mark WebSocket message received
+            WebSocketWatchdog.markMessageReceived();
+            
+            let message = JSON.parse(event.data);
+            
+            // SUPERHUMAN: Detect new game start
+            if (message.t === "crowd" || message.t === "featured") {
+                resetGameState();
+                WatchdogLog.info("🎮 New game detected - state reset");
+            }
+            
+            // Check for move rejection or error messages
+            if (message.t === "redirect" || message.t === "resync") {
+                WatchdogLog.warn("🔄 Server requesting resync/redirect - force reset");
+                forceUnlockAndReset("server resync request");
+                botJustSentMove = false;
+                return;
+            }
+            
+            // Check for error messages indicating rejected move
+            if (message.t === "error" || (message.d && message.d.error)) {
+                WatchdogLog.warn("❌ Server error - possible move rejection");
+                
+                // Track rejection if a move was pending
+                if (pendingMove) {
+                    lastRejectedMove = pendingMove;
+                    rejectionCount++;
+                    WatchdogLog.warn(`   Move '${pendingMove}' rejected (count: ${rejectionCount})`);
+                }
+                
+                // Force reset but keep position ready
+                forceUnlockAndReset("move rejected");
+                
+                // Restore position ready state for current color
+                if (currentFen) {
+                    const fenColor = getActiveColorFromFen(currentFen);
+                    if (fenColor) {
+                        const now = Date.now();
+                        if (fenColor === 'w') {
+                            WatchdogState.whitePositionReady = true;
+                            WatchdogState.lastWhitePositionTime = now;
+                        } else {
+                            WatchdogState.blackPositionReady = true;
+                            WatchdogState.lastBlackPositionTime = now;
+                        }
+                    }
+                }
+                
+                botJustSentMove = false;
+                pendingMove = null;
+                
+                // Try alternative move from multiPV if available
+                if (multiPVLines.length >= 2 && rejectionCount <= 3) {
+                    let alternativeMove = null;
+                    for (let i = 1; i < Math.min(multiPVLines.length, 5); i++) {
+                        const altMove = multiPVLines[i].move;
+                        if (altMove !== lastRejectedMove) {
+                            alternativeMove = altMove;
+                            WatchdogLog.info(`✅ Using alternative move #${i}: ${altMove}`);
+                            break;
+                        }
+                    }
+                    
+                    if (alternativeMove) {
+                        setTimeout(() => {
+                            sendMove(alternativeMove);
+                        }, 300);
+                        return;
+                    }
+                }
+                
+                // Recalculate after brief delay if no alternatives
+                setTimeout(() => {
+                    WatchdogLog.info("🎯 Recalculating after move rejection");
+                    scheduleCalculate();
+                }, 500);
+                
+                return;
+            }
+            
+            // CRITICAL: Route ALL position messages through handlePositionMessage
+            // This ensures proper per-color tracking and deadlock prevention
+            handlePositionMessage(message);
+            
+        } catch (e) {
+            WatchdogLog.error(`WebSocket message handler error: ${e.message}`);
+        }
+    });
+}
+
 // Enhance WebSocket interception with watchdog
 const _originalInterceptWebSocket = interceptWebSocket;
 
@@ -3004,74 +3220,12 @@ interceptWebSocket = function() {
     const webSocketProxy = new Proxy(webSocket, {
         construct: function (target, args) {
             let wrappedWebSocket = new target(...args);
+            
+            WatchdogLog.info("🔌 New WebSocket created");
             webSocketWrapper = wrappedWebSocket;
-
-            wrappedWebSocket.addEventListener("message", function (event) {
-                try {
-                    // Watchdog: Mark WebSocket message received
-                    WebSocketWatchdog.markMessageReceived();
-                    
-                    let message = JSON.parse(event.data);
-                    
-                    // SUPERHUMAN: Detect new game start
-                    if (message.t === "crowd" || message.t === "featured") {
-                        resetGameState();
-                    }
-                    
-                    if (message.d && typeof message.d.fen === "string" && typeof message.v === "number") {
-                        currentFen = message.d.fen;
-                        
-                        let isWhitesTurn = message.v % 2 == 0;
-                        myColor = isWhitesTurn ? 'w' : 'b';
-                        
-                        if (isWhitesTurn) {
-                            currentFen += " w";
-                        } else {
-                            currentFen += " b";
-                        }
-                        
-                        moveCount = Math.floor(message.v / 2) + 1;
-                        
-                        // SUPERHUMAN: Track position for repetition
-                        trackPosition(currentFen);
-                        
-                        // SUPERHUMAN: Enhanced game phase detection
-                        gamePhase = getGamePhase(moveCount, currentFen);
-                        positionType = analyzePositionType(currentFen);
-                        
-                        // SUPERHUMAN: Detect endgame type for technique
-                        if (gamePhase === "endgame") {
-                            detectEndgameType(currentFen);
-                        }
-                        
-                        // SUPERHUMAN: Adjust contempt based on winning status
-                        adjustContempt();
-                        
-                        calculateMove();
-                    }
-                } catch (e) {
-                    WatchdogLog.error(`WebSocket message handler error: ${e.message}`);
-                }
-            });
             
-            // Watchdog: Monitor WebSocket state changes
-            wrappedWebSocket.addEventListener("close", function(event) {
-                WatchdogLog.warn(`WebSocket closed: code=${event.code}, reason=${event.reason}`);
-                WatchdogState.wsAlive = false;
-            });
-            
-            wrappedWebSocket.addEventListener("error", function(event) {
-                WatchdogLog.error("WebSocket error occurred");
-                WatchdogState.wsAlive = false;
-                CircuitBreaker.recordFailure('websocket');
-            });
-            
-            wrappedWebSocket.addEventListener("open", function(event) {
-                WatchdogLog.info("WebSocket opened");
-                WatchdogState.wsAlive = true;
-                WatchdogState.wsRecoveryAttempts = 0;
-                CircuitBreaker.recordSuccess('websocket');
-            });
+            // CRITICAL: Use setupWebSocketHandlers for proper event handling
+            setupWebSocketHandlers(wrappedWebSocket);
             
             return wrappedWebSocket;
         }
@@ -3083,6 +3237,9 @@ interceptWebSocket = function() {
 // Re-run initialization with watchdog-enhanced functions
 interceptWebSocket();
 setupChessEngineOnMessage();
+
+// Setup manual move detection for board observation
+setupManualMoveDetection();
 
 // Initialize Watchdog Master
 WatchdogMaster.initialize();
