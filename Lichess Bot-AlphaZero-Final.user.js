@@ -2,7 +2,7 @@
 // @name         Lichess Bot - True AlphaZero (God-Like Edition)
 // @description  True AlphaZero - Flawless endgame, perfect positional judgment, strategic depth, legendary patience
 // @author       AlphaZero - God-Like Edition
-// @version      5.0.0-ALPHAZERO-GODLIKE
+// @version      6.0.0-ALPHAZERO-GODLIKE
 // @match         *://lichess.org/*
 // @run-at        document-start
 // @grant         none
@@ -12,58 +12,62 @@
 'use strict';
 
 // ═══════════════════════════════════════════════════════════════════════
-// CONFIGURATION - TRUE ALPHAZERO: STRATEGIC DEPTH, PATIENCE, FLAWLESS PLAY
-// AlphaZero's hallmark: unconventional play, grinding positions, resilience
+// CONFIGURATION - TRUE ALPHAZERO: NO PASSIVE PLAY, UNCONVENTIONAL DEPTH
+// AlphaZero's hallmark: ACTIVE play, strategic webs, flawless precision
 // ═══════════════════════════════════════════════════════════════════════
 
 const CONFIG = {
-    // Timing - Patient and precise like AlphaZero
-    thinkingTimeMin: 80,
-    thinkingTimeMax: 600,
+    // Timing - Patient yet decisive like AlphaZero
+    thinkingTimeMin: 60,
+    thinkingTimeMax: 450,
     
     // NO MISTAKES - AlphaZero plays flawlessly
     humanMistakeRate: 0,
     
-    // Depth - Enhanced for strategic vision and endgame precision
-    baseDepth: 15,
-    tacticalDepth: 17,
-    positionalDepth: 16,
-    endgameDepth: 20,           // FLAWLESS endgame - maximum depth
-    openingDepth: 13,
-    strategicDepth: 18,         // For long-term planning positions
+    // Depth - Optimized for strategic vision and endgame precision
+    baseDepth: 14,
+    tacticalDepth: 16,
+    positionalDepth: 15,
+    endgameDepth: 18,           // FLAWLESS endgame - maximum precision
+    openingDepth: 12,
+    strategicDepth: 16,         // For long-term planning positions
+    zugzwangDepth: 19,          // Deep calculation for zugzwang detection
     
-    // Speed multipliers - Patient, methodical play
-    openingSpeed: 0.25,
-    earlyMidSpeed: 0.4,
-    middlegameSpeed: 0.55,
-    lateMidSpeed: 0.5,
-    endgameSpeed: 0.7,          // More time for precise endgame
-    criticalSpeed: 0.8,
-    grindingSpeed: 0.65,        // For complex grinding positions
+    // Speed multipliers - Active, purposeful play (NOT passive)
+    openingSpeed: 0.2,
+    earlyMidSpeed: 0.35,
+    middlegameSpeed: 0.45,
+    lateMidSpeed: 0.4,
+    endgameSpeed: 0.55,
+    criticalSpeed: 0.65,
+    grindingSpeed: 0.5,
+    activePlaySpeed: 0.3,       // Fast when position demands activity
     
     // Time thresholds
     panicThreshold: 5000,
     criticalThreshold: 10000,
     
-    // AlphaZero Strategic Settings - NOT passive, strategically DEEP
-    strategicDepthLevel: 95,     // Strategic depth (0-100)
-    positionalPatience: 90,      // Patience in positional play (0-100)
+    // AlphaZero Strategic Settings - ACTIVE, NOT PASSIVE
+    strategicDepthLevel: 98,     // Strategic depth (0-100)
+    positionalPatience: 85,      // Patience balanced with activity
     endgamePrecision: 100,       // FLAWLESS endgame precision
-    resilience: 95,              // Defensive resilience
-    grindingAbility: 90,         // Ability to grind out positions
+    resilience: 98,              // Exceptional defensive resilience
+    grindingAbility: 95,         // Ability to grind out positions
+    activityPreference: 90,      // ACTIVE piece play priority
     
     // Positional Bonuses - AlphaZero's superior evaluation
-    pieceActivityBonus: 45,      // Active pieces over material
-    pawnStructureWeight: 40,     // Long-term pawn structure
+    pieceActivityBonus: 55,      // ACTIVE pieces paramount
+    pawnStructureWeight: 45,     // Long-term pawn structure
     kingSafetyWeight: 50,        // King safety evaluation
-    spaceControlBonus: 35,       // Space advantage
-    initiativeBonus: 30,         // Maintaining initiative
-    prophylaxisBonus: 25,        // Preventing opponent plans
+    spaceControlBonus: 40,       // Space advantage
+    initiativeBonus: 50,         // MAINTAINING INITIATIVE (no passivity)
+    prophylaxisBonus: 35,        // Preventing opponent plans
+    zugzwangAwareness: 95,       // Avoid zugzwang traps
     
-    // Draw Handling - AlphaZero recognizes draws early but plays to confirm
+    // Draw Handling - AlphaZero recognizes draws but plays to confirm
     allowStrategicDraws: true,   // Accept draws when objectively best
-    drawConfirmationMoves: 10,   // Moves to confirm a draw position
-    minAdvantageToPlay: 5        // Centipawns advantage to keep playing
+    drawConfirmationMoves: 8,    // Moves to confirm a draw position
+    minAdvantageToPlay: 3        // Centipawns advantage to keep playing
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -215,6 +219,10 @@ let timeRemaining = 30000;
 let lastEvaluation = 0;           // Track position evaluation
 let drawMoveCounter = 0;          // Track moves in draw territory
 let positionHistory = [];         // Track position repetitions
+let isCalculating = false;        // Prevent concurrent calculations
+let lastMoveTime = 0;             // Track timing for stability
+let activityScore = 0;            // Track piece activity level
+let zugzwangRisk = false;         // Track zugzwang potential
 
 // ═══════════════════════════════════════════════════════════════════════
 // ALPHAZERO STRATEGIC HELPERS - God-Like Evaluation
@@ -394,6 +402,144 @@ function detectEndgameType(fen) {
 }
 
 /**
+ * AlphaZero Zugzwang Detection - Avoid zugzwang traps
+ * Critical for endgame precision
+ */
+function detectZugzwangRisk(fen) {
+    const pieces = countPieceTypes(fen);
+    const totalPieces = countPieces(fen);
+    const endgameType = detectEndgameType(fen);
+    
+    // Zugzwang most common in pure pawn endgames
+    if (endgameType === "pawn-endgame") {
+        // High zugzwang risk in king + pawn positions
+        if (totalPieces <= 6) return 0.9;
+        return 0.7;
+    }
+    
+    // Rook endgames can have zugzwang but less common
+    if (endgameType === "rook-endgame") {
+        if (totalPieces <= 5) return 0.5;
+        return 0.3;
+    }
+    
+    // Knight endgames have zugzwang potential
+    if (endgameType === "knight-endgame") {
+        return 0.6;
+    }
+    
+    // Bishop endgames - especially same color
+    if (endgameType === "bishop-endgame") {
+        return 0.5;
+    }
+    
+    // Minor piece endgames
+    if (endgameType === "minor-piece-endgame") {
+        return 0.4;
+    }
+    
+    // Complex endgames
+    if (endgameType === "complex-endgame") {
+        return 0.2;
+    }
+    
+    // Middlegame - low zugzwang risk
+    return 0.05;
+}
+
+/**
+ * AlphaZero Piece Activity Evaluation - ACTIVE play is key
+ * Evaluates how active pieces are positioned
+ */
+function evaluatePieceActivityLevel(fen) {
+    const board = fen.split(' ')[0];
+    const rows = board.split('/');
+    let activity = { white: 0, black: 0 };
+    
+    // Central squares are valuable (d4, d5, e4, e5 = ranks 3,4 files 3,4)
+    const centralFiles = [3, 4];
+    const centralRanks = [3, 4];
+    
+    for (let rank = 0; rank < 8; rank++) {
+        let file = 0;
+        for (let c of rows[rank]) {
+            if (c >= '1' && c <= '8') {
+                file += parseInt(c);
+            } else {
+                const isCentral = centralFiles.includes(file) && centralRanks.includes(rank);
+                const isExtendedCenter = file >= 2 && file <= 5 && rank >= 2 && rank <= 5;
+                
+                // Piece activity bonuses based on position
+                if (c === 'N' || c === 'B') {
+                    // Knights and bishops love central squares
+                    if (isCentral) activity.white += 25;
+                    else if (isExtendedCenter) activity.white += 15;
+                    else if (rank >= 2 && rank <= 5) activity.white += 8;
+                    // Penalty for undeveloped pieces
+                    if (rank === 7) activity.white -= 10;
+                }
+                if (c === 'n' || c === 'b') {
+                    if (isCentral) activity.black += 25;
+                    else if (isExtendedCenter) activity.black += 15;
+                    else if (rank >= 2 && rank <= 5) activity.black += 8;
+                    if (rank === 0) activity.black -= 10;
+                }
+                if (c === 'R') {
+                    // Rooks on open files/7th rank
+                    if (rank <= 1) activity.white += 20; // 7th rank
+                    if (file === 3 || file === 4) activity.white += 10; // Central files
+                }
+                if (c === 'r') {
+                    if (rank >= 6) activity.black += 20;
+                    if (file === 3 || file === 4) activity.black += 10;
+                }
+                if (c === 'Q') {
+                    // Queen activity - not too early
+                    if (isExtendedCenter && rank <= 4) activity.white += 15;
+                }
+                if (c === 'q') {
+                    if (isExtendedCenter && rank >= 3) activity.black += 15;
+                }
+                
+                file++;
+            }
+        }
+    }
+    
+    return activity;
+}
+
+/**
+ * Prophylaxis Evaluation - AlphaZero's defensive awareness
+ * Identifies opponent's plans and counters
+ */
+function evaluateProphylaxis(fen) {
+    const pieces = countPieceTypes(fen);
+    const kingSafety = evaluateKingSafety(fen);
+    let prophylaxisScore = 0;
+    
+    // King safety awareness
+    const mySafety = myColor === 'w' ? kingSafety.white : kingSafety.black;
+    const oppSafety = myColor === 'w' ? kingSafety.black : kingSafety.white;
+    
+    // If opponent's king is unsafe, we have initiative
+    if (oppSafety < 0) prophylaxisScore += Math.abs(oppSafety) * 0.5;
+    
+    // If our king needs protection
+    if (mySafety < 0) prophylaxisScore -= Math.abs(mySafety) * 0.3;
+    
+    // Material imbalances that need awareness
+    const myQueens = myColor === 'w' ? pieces.wQ : pieces.bQ;
+    const oppQueens = myColor === 'w' ? pieces.bQ : pieces.wQ;
+    
+    // Queen vs no queen - tactical awareness needed
+    if (myQueens > 0 && oppQueens === 0) prophylaxisScore += 30;
+    if (myQueens === 0 && oppQueens > 0) prophylaxisScore -= 20;
+    
+    return prophylaxisScore;
+}
+
+/**
  * Check if position is likely drawn - AlphaZero's precise evaluation
  */
 function isLikelyDraw(fen, evaluation) {
@@ -436,7 +582,8 @@ function getGamePhase(moveNum, fen) {
 }
 
 /**
- * AlphaZero Position Analysis - Strategic depth over pure aggression
+ * AlphaZero Position Analysis - ACTIVE play, NOT passive
+ * Strategic depth balanced with initiative
  */
 function analyzePositionType(fen) {
     const pieces = countPieceTypes(fen);
@@ -444,11 +591,21 @@ function analyzePositionType(fen) {
     const endgameType = detectEndgameType(fen);
     const pawnStructure = analyzePawnStructure(fen);
     const kingSafety = evaluateKingSafety(fen);
+    const pieceActivity = evaluatePieceActivityLevel(fen);
+    const zRisk = detectZugzwangRisk(fen);
+    
+    // Update global zugzwang awareness
+    zugzwangRisk = zRisk > 0.5;
     
     // Endgame - FLAWLESS precision mode
     if (endgameType !== "not-endgame") {
-        if (endgameType === "pawn-endgame") return "pawn-precision";
+        if (endgameType === "pawn-endgame") {
+            if (zRisk > 0.7) return "zugzwang-precision";
+            return "pawn-precision";
+        }
         if (endgameType === "rook-endgame") return "rook-technique";
+        if (endgameType === "knight-endgame") return "knight-precision";
+        if (endgameType === "bishop-endgame") return "bishop-precision";
         return "endgame-grinding";
     }
     
@@ -460,66 +617,89 @@ function analyzePositionType(fen) {
         (pieces.bQ * 9 + pieces.bR * 5 + pieces.bB * 3.25 + pieces.bN * 3 + pieces.bP) :
         (pieces.wQ * 9 + pieces.wR * 5 + pieces.wB * 3.25 + pieces.wN * 3 + pieces.wP);
     
-    // King safety issues - need defensive precision
+    // King safety evaluation
     const mySafety = myColor === 'w' ? kingSafety.white : kingSafety.black;
     const oppSafety = myColor === 'w' ? kingSafety.black : kingSafety.white;
     
-    if (mySafety < -15) return "defensive-resilience";
-    if (oppSafety < -15) return "strategic-pressure";
+    // Piece activity evaluation
+    const myActivity = myColor === 'w' ? pieceActivity.white : pieceActivity.black;
+    const oppActivity = myColor === 'w' ? pieceActivity.black : pieceActivity.white;
+    activityScore = myActivity - oppActivity;
     
-    // Material advantage - grind it out
-    if (myMaterial > oppMaterial + 2) return "strategic-conversion";
+    // ACTIVE play - attack weak king
+    if (oppSafety < -20) return "active-attack";
+    
+    // Defensive resilience when needed
+    if (mySafety < -15) return "defensive-resilience";
+    
+    // High piece activity advantage - press the initiative
+    if (myActivity > oppActivity + 20) return "active-initiative";
+    
+    // Material advantage - actively convert
+    if (myMaterial > oppMaterial + 2) return "active-conversion";
     if (myMaterial < oppMaterial - 2) return "resilient-defense";
     
-    // Good pawn structure - play strategically
-    if (pawnStructure.centerControl > 5) return "positional-squeeze";
+    // Good pawn structure - active pressure
+    if (pawnStructure.centerControl > 5) return "active-squeeze";
     
-    // Complex middlegame - strategic maneuvering
+    // Activity disadvantage - improve pieces actively
+    if (myActivity < oppActivity - 15) return "active-improvement";
+    
+    // Complex middlegame - strategic maneuvering with activity
     if (totalPieces > 24) return "strategic-complexity";
     
-    // Default: balanced strategic play
-    return "strategic-balance";
+    // Default: balanced but ACTIVE play
+    return "active-balance";
 }
 
 /**
- * AlphaZero Thinking Time - Patient and precise
+ * AlphaZero Thinking Time - Efficient, not wasteful
+ * Fast when position is clear, thorough when complex
  */
 function getThinkTime(phase, posType, timeLeft) {
     let speedMultiplier = 1.0;
     
-    // AlphaZero is patient and methodical
+    // AlphaZero is efficient - doesn't waste time
     if (phase === "opening") speedMultiplier = CONFIG.openingSpeed;
     else if (phase === "early-middlegame") speedMultiplier = CONFIG.earlyMidSpeed;
     else if (phase === "middlegame") speedMultiplier = CONFIG.middlegameSpeed;
     else if (phase === "late-middlegame") speedMultiplier = CONFIG.lateMidSpeed;
     else if (phase === "endgame") speedMultiplier = CONFIG.endgameSpeed;
     
-    // Position-specific adjustments - patience in complex positions
-    if (posType === "pawn-precision" || posType === "rook-technique") {
-        speedMultiplier = CONFIG.endgameSpeed * 1.1; // Extra time for precision
-    } else if (posType === "endgame-grinding" || posType === "strategic-conversion") {
+    // Position-specific adjustments - efficiency focus
+    if (posType === "pawn-precision" || posType === "zugzwang-precision") {
+        speedMultiplier = CONFIG.endgameSpeed * 0.9; // Precise but efficient
+    } else if (posType === "rook-technique" || posType === "knight-precision" || posType === "bishop-precision") {
+        speedMultiplier = CONFIG.endgameSpeed * 0.85;
+    } else if (posType === "endgame-grinding" || posType === "active-conversion") {
         speedMultiplier = CONFIG.grindingSpeed;
     } else if (posType === "defensive-resilience" || posType === "resilient-defense") {
-        speedMultiplier = CONFIG.criticalSpeed;
+        speedMultiplier = CONFIG.criticalSpeed * 0.85;
+    } else if (posType === "active-attack" || posType === "active-initiative") {
+        speedMultiplier = CONFIG.activePlaySpeed; // Fast when attacking
+    } else if (posType === "active-improvement" || posType === "active-squeeze") {
+        speedMultiplier = CONFIG.middlegameSpeed * 0.8;
     } else if (posType === "strategic-complexity") {
-        speedMultiplier *= 0.9; // Slightly more time for complex positions
+        speedMultiplier *= 0.75;
+    } else if (posType === "active-balance") {
+        speedMultiplier = CONFIG.middlegameSpeed * 0.7;
     }
     
-    // Time pressure - maintain quality even under pressure
-    if (timeLeft < CONFIG.criticalThreshold) speedMultiplier *= 0.55;
-    if (timeLeft < CONFIG.panicThreshold) speedMultiplier *= 0.4;
-    if (timeLeft < 3000) speedMultiplier *= 0.3;
-    if (timeLeft < 1500) speedMultiplier *= 0.2;
+    // Time pressure - maintain quality with efficiency
+    if (timeLeft < CONFIG.criticalThreshold) speedMultiplier *= 0.5;
+    if (timeLeft < CONFIG.panicThreshold) speedMultiplier *= 0.35;
+    if (timeLeft < 3000) speedMultiplier *= 0.25;
+    if (timeLeft < 1500) speedMultiplier *= 0.15;
     
     let baseTime = CONFIG.thinkingTimeMin;
     let variance = (CONFIG.thinkingTimeMax - CONFIG.thinkingTimeMin) * speedMultiplier;
     
-    const thinkTime = baseTime + (Math.random() * variance * 0.25);
-    return Math.floor(Math.max(60, Math.min(thinkTime, CONFIG.thinkingTimeMax)));
+    const thinkTime = baseTime + (Math.random() * variance * 0.2);
+    return Math.floor(Math.max(45, Math.min(thinkTime, CONFIG.thinkingTimeMax)));
 }
 
 /**
- * AlphaZero Depth - Enhanced for strategic depth and endgame precision
+ * AlphaZero Depth - Optimized for precision without waste
  */
 function getDepth(phase, posType, timeLeft) {
     let depth = CONFIG.baseDepth;
@@ -527,32 +707,36 @@ function getDepth(phase, posType, timeLeft) {
     if (phase === "opening") {
         depth = CONFIG.openingDepth;
     } else if (phase === "endgame") {
-        // FLAWLESS endgame - maximum depth
+        // FLAWLESS endgame - appropriate depth for precision
         depth = CONFIG.endgameDepth;
         
         // Extra depth for critical endgame types
-        if (posType === "pawn-precision") depth = CONFIG.endgameDepth + 2;
-        else if (posType === "rook-technique") depth = CONFIG.endgameDepth + 1;
+        if (posType === "zugzwang-precision") depth = CONFIG.zugzwangDepth;
+        else if (posType === "pawn-precision") depth = CONFIG.endgameDepth + 1;
+        else if (posType === "rook-technique") depth = CONFIG.endgameDepth;
+        else if (posType === "knight-precision" || posType === "bishop-precision") depth = CONFIG.endgameDepth;
     } else {
-        // Middlegame - strategic depth
-        if (posType === "strategic-complexity" || posType === "positional-squeeze") {
+        // Middlegame - efficient depth selection
+        if (posType === "strategic-complexity") {
             depth = CONFIG.strategicDepth;
-        } else if (posType === "strategic-pressure" || posType === "defensive-resilience") {
-            depth = CONFIG.tacticalDepth;
-        } else if (posType === "strategic-conversion") {
-            depth = CONFIG.positionalDepth + 1;
-        } else if (posType === "resilient-defense") {
-            depth = CONFIG.tacticalDepth + 1; // Extra depth for defense
-        } else {
+        } else if (posType === "active-attack" || posType === "active-initiative") {
+            depth = CONFIG.tacticalDepth; // Tactical precision for attacks
+        } else if (posType === "defensive-resilience" || posType === "resilient-defense") {
+            depth = CONFIG.tacticalDepth; // Deep for defense
+        } else if (posType === "active-conversion" || posType === "active-squeeze") {
             depth = CONFIG.positionalDepth;
+        } else if (posType === "active-improvement") {
+            depth = CONFIG.positionalDepth;
+        } else {
+            depth = CONFIG.baseDepth;
         }
     }
     
-    // Time pressure - maintain reasonable depth for quality
-    if (timeLeft < CONFIG.criticalThreshold) depth = Math.max(12, depth - 1);
-    if (timeLeft < CONFIG.panicThreshold) depth = Math.max(11, depth - 2);
-    if (timeLeft < 3000) depth = Math.max(10, depth - 3);
-    if (timeLeft < 1500) depth = Math.max(9, depth - 4);
+    // Time pressure - maintain reasonable depth
+    if (timeLeft < CONFIG.criticalThreshold) depth = Math.max(11, depth - 1);
+    if (timeLeft < CONFIG.panicThreshold) depth = Math.max(10, depth - 2);
+    if (timeLeft < 3000) depth = Math.max(9, depth - 3);
+    if (timeLeft < 1500) depth = Math.max(8, depth - 4);
     
     return depth;
 }
@@ -581,8 +765,8 @@ function getBookMove(fen) {
 }
 
 /**
- * AlphaZero Move Selection - Strategic depth, patience, no mistakes
- * Prioritizes: long-term advantage, piece activity, positional pressure
+ * AlphaZero Move Selection - ACTIVE play, strategic depth, no mistakes
+ * Prioritizes: initiative, piece activity, long-term advantage
  */
 function selectBestStrategicMove(bestMove, alternatives, phase, posType) {
     if (!alternatives || alternatives.length < 2) return bestMove;
@@ -590,7 +774,7 @@ function selectBestStrategicMove(bestMove, alternatives, phase, posType) {
     // AlphaZero NEVER makes intentional mistakes
     const bestScore = alternatives[0].score || 0;
     
-    // In endgame - pure precision, always play objectively best
+    // In endgame - precision mode
     if (phase === "endgame") {
         // Check for draw recognition
         if (CONFIG.allowStrategicDraws && isLikelyDraw(currentFen, bestScore)) {
@@ -598,21 +782,28 @@ function selectBestStrategicMove(bestMove, alternatives, phase, posType) {
             // Play precisely to confirm the draw
             return bestMove;
         }
-        // Endgame: strict best move only
+        
+        // Zugzwang awareness - be careful with move selection
+        if (zugzwangRisk && posType === "zugzwang-precision") {
+            // In zugzwang positions, strictly play objectively best
+            return bestMove;
+        }
+        
+        // Endgame: strict best move, but prefer active moves if equal
         return bestMove;
     }
     
-    // Strategic move selection for middlegame
+    // ACTIVE move selection for middlegame - NO PASSIVE PLAY
     for (let i = 1; i < Math.min(alternatives.length, 4); i++) {
         const alt = alternatives[i];
         const scoreDiff = bestScore - (alt.score || 0);
         
-        // If move is within 10 centipawns, consider strategic factors
-        if (scoreDiff <= 10 && scoreDiff >= 0) {
+        // If move is within 8 centipawns, consider activity factors
+        if (scoreDiff <= 8 && scoreDiff >= 0) {
             const move = alt.move;
             
-            // Prefer strategically superior moves
-            if (isStrategicallyBetter(move, bestMove, posType)) {
+            // Prefer ACTIVE moves that maintain initiative
+            if (isMoreActive(move, bestMove, posType)) {
                 return move;
             }
         }
@@ -622,74 +813,125 @@ function selectBestStrategicMove(bestMove, alternatives, phase, posType) {
 }
 
 /**
- * Evaluate if a move is strategically better (AlphaZero's unconventional play)
+ * Evaluate if a move is more ACTIVE (AlphaZero's unconventional, non-passive play)
  */
-function isStrategicallyBetter(move, bestMove, posType) {
+function isMoreActive(move, bestMove, posType) {
     if (!move || move.length < 4) return false;
+    
+    const moveActivity = evaluateMoveActivity(move);
+    const bestActivity = evaluateMoveActivity(bestMove);
+    
+    // Prefer more active moves
+    if (moveActivity > bestActivity + 5) return true;
     
     const toSquare = move.substring(2, 4);
     const fromSquare = move.substring(0, 2);
     const toFile = toSquare[0];
     const toRank = toSquare[1];
     const fromFile = fromSquare[0];
+    const fromRank = fromSquare[1];
     
-    // Position type specific preferences
-    if (posType === "strategic-conversion" || posType === "positional-squeeze") {
-        // Prefer central control and piece activity
+    // Position type specific ACTIVE preferences
+    if (posType === "active-attack" || posType === "active-initiative") {
+        // Prefer forward moves toward enemy
+        if (myColor === 'w' && parseInt(toRank) > parseInt(fromRank)) return true;
+        if (myColor === 'b' && parseInt(toRank) < parseInt(fromRank)) return true;
+        
+        // Prefer central control
         if ((toFile === 'd' || toFile === 'e') && (toRank === '4' || toRank === '5')) {
             return true;
         }
-        // Prefer rook lifts and piece improvements
+    }
+    
+    if (posType === "active-conversion" || posType === "active-squeeze") {
+        // Prefer space-gaining moves
+        if ((toFile === 'd' || toFile === 'e') && (toRank === '4' || toRank === '5')) {
+            return true;
+        }
+        // Prefer piece activation
         if (fromFile === 'a' || fromFile === 'h') {
             if (toFile >= 'c' && toFile <= 'f') return true;
+        }
+        // Prefer rook lifts
+        if (fromRank === '1' || fromRank === '8') {
+            if ((myColor === 'w' && (toRank === '3' || toRank === '4')) ||
+                (myColor === 'b' && (toRank === '5' || toRank === '6'))) {
+                return true;
+            }
         }
     }
     
     if (posType === "defensive-resilience" || posType === "resilient-defense") {
-        // Prefer moves that improve piece coordination
-        // Prefer centralization for defense
+        // Even in defense, prefer ACTIVE defense
+        // Centralize pieces for coordination
         if ((toFile === 'c' || toFile === 'd' || toFile === 'e' || toFile === 'f') &&
             (toRank === '2' || toRank === '3' || toRank === '6' || toRank === '7')) {
             return true;
         }
+        // Prefer counterattacking possibilities
+        if (myColor === 'w' && toRank >= '4') return true;
+        if (myColor === 'b' && toRank <= '5') return true;
     }
     
-    if (posType === "strategic-pressure") {
-        // Prefer moves toward enemy territory
-        if (myColor === 'w' && (toRank === '6' || toRank === '7')) return true;
-        if (myColor === 'b' && (toRank === '2' || toRank === '3')) return true;
+    if (posType === "active-improvement") {
+        // Piece improvement - get pieces to better squares
+        if ((toFile === 'd' || toFile === 'e') && (toRank >= '3' && toRank <= '6')) {
+            return true;
+        }
     }
     
-    // General strategic preferences
-    // Piece activity over passivity
-    if ((toFile === 'd' || toFile === 'e') && (toRank === '4' || toRank === '5')) {
-        return true;
+    if (posType === "active-balance") {
+        // Maintain tension, don't release
+        // Prefer flexible moves that keep options open
+        if ((toFile === 'c' || toFile === 'd' || toFile === 'e' || toFile === 'f')) {
+            return true;
+        }
     }
     
     return false;
 }
 
 /**
- * Evaluate move for piece activity (AlphaZero values active pieces)
+ * Evaluate move activity level - ACTIVE play measurement
  */
-function evaluatePieceActivity(move) {
+function evaluateMoveActivity(move) {
     if (!move || move.length < 4) return 0;
     
     const toSquare = move.substring(2, 4);
+    const fromSquare = move.substring(0, 2);
     const toFile = toSquare.charCodeAt(0) - 97; // 0-7
     const toRank = parseInt(toSquare[1]) - 1;   // 0-7
+    const fromFile = fromSquare.charCodeAt(0) - 97;
+    const fromRank = parseInt(fromSquare[1]) - 1;
     
     let activity = 0;
     
-    // Central squares are valuable
+    // Central squares are most active
     const centerDistance = Math.abs(toFile - 3.5) + Math.abs(toRank - 3.5);
-    activity += Math.max(0, 7 - centerDistance * 2);
+    activity += Math.max(0, 10 - centerDistance * 1.5);
     
-    // Forward progress (toward enemy)
+    // Forward progress (toward enemy) - ACTIVE play
     if (myColor === 'w') {
-        activity += toRank;
+        activity += (toRank - fromRank) * 2; // Reward forward moves
+        activity += toRank; // Bonus for advanced position
     } else {
-        activity += (7 - toRank);
+        activity += (fromRank - toRank) * 2; // Reward forward moves
+        activity += (7 - toRank); // Bonus for advanced position
+    }
+    
+    // Extended center control
+    if (toFile >= 2 && toFile <= 5 && toRank >= 2 && toRank <= 5) {
+        activity += 5;
+    }
+    
+    // Piece activation from corner/edge
+    if ((fromFile === 0 || fromFile === 7) && (toFile >= 2 && toFile <= 5)) {
+        activity += 6;
+    }
+    
+    // Promotion potential for pawns
+    if (move.length > 4) {
+        activity += 15; // Promotion is very active
     }
     
     return activity;
@@ -729,39 +971,60 @@ function parseMultiPV(output) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// ENGINE INITIALIZATION - AlphaZero Strategic Settings (God-Like)
+// ENGINE INITIALIZATION - AlphaZero Settings (Efficient & Stable)
 // ═══════════════════════════════════════════════════════════════════════
 
 function initializeChessEngine() {
-    chessEngine = window.STOCKFISH();
+    if (typeof window.STOCKFISH !== 'function') return false;
     
-    chessEngine.postMessage("uci");
-    
-    // AlphaZero Strategic Settings - Balanced for positional mastery
-    chessEngine.postMessage("setoption name MultiPV value 4");        // Analyze top 4 moves for strategic choice
-    chessEngine.postMessage("setoption name Contempt value 24");      // Balanced - allows strategic draws when best
-    chessEngine.postMessage("setoption name Move Overhead value 25"); // Responsive
-    chessEngine.postMessage("setoption name Slow Mover value 90");    // Patient, methodical play
-    
-    chessEngine.postMessage("isready");
+    try {
+        chessEngine = window.STOCKFISH();
+        
+        chessEngine.postMessage("uci");
+        
+        // AlphaZero Strategic Settings - Balanced for ACTIVE play
+        chessEngine.postMessage("setoption name MultiPV value 4");        // Analyze top 4 moves for active selection
+        chessEngine.postMessage("setoption name Contempt value 20");      // Balanced - plays for wins but accepts good draws
+        chessEngine.postMessage("setoption name Move Overhead value 20"); // Fast response
+        chessEngine.postMessage("setoption name Slow Mover value 80");    // Efficient play
+        
+        chessEngine.postMessage("isready");
+        return true;
+    } catch (e) {
+        return false;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// WEBSOCKET INTERCEPTION - Stable and efficient
+// WEBSOCKET INTERCEPTION - Stable and efficient (no page breaking)
 // ═══════════════════════════════════════════════════════════════════════
 
 function interceptWebSocket() {
-    let webSocket = window.WebSocket;
-    const webSocketProxy = new Proxy(webSocket, {
+    if (!window.WebSocket) return;
+    
+    const OriginalWebSocket = window.WebSocket;
+    
+    const webSocketProxy = new Proxy(OriginalWebSocket, {
         construct: function (target, args) {
-            let wrappedWebSocket = new target(...args);
+            let wrappedWebSocket;
+            try {
+                wrappedWebSocket = new target(...args);
+            } catch (e) {
+                return new target(...args);
+            }
+            
             webSocketWrapper = wrappedWebSocket;
 
             wrappedWebSocket.addEventListener("message", function (event) {
                 try {
+                    if (!event.data || typeof event.data !== 'string') return;
+                    
                     let message = JSON.parse(event.data);
                     
                     if (message.d && typeof message.d.fen === "string" && typeof message.v === "number") {
+                        // Prevent concurrent calculations
+                        if (isCalculating) return;
+                        
                         currentFen = message.d.fen;
                         
                         let isWhitesTurn = message.v % 2 == 0;
@@ -787,7 +1050,12 @@ function interceptWebSocket() {
                             timeRemaining = myColor === 'w' ? message.d.wc : message.d.bc;
                         }
                         
-                        calculateMove();
+                        // Throttle calculations
+                        const now = Date.now();
+                        if (now - lastMoveTime > 50) {
+                            lastMoveTime = now;
+                            calculateMove();
+                        }
                     }
                 } catch (e) {
                     // Silent catch to prevent errors from breaking the page
@@ -802,69 +1070,94 @@ function interceptWebSocket() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// MOVE CALCULATION - AlphaZero Style (Strategic Depth)
+// MOVE CALCULATION - AlphaZero Style (ACTIVE, Strategic Depth)
 // ═══════════════════════════════════════════════════════════════════════
 
 function calculateMove() {
+    if (isCalculating) return;
+    isCalculating = true;
+    
     // Opening book - strategic repertoire
     if (gamePhase === "opening" || (gamePhase === "early-middlegame" && moveCount <= 12)) {
         const bookMove = getBookMove(currentFen);
         
         if (bookMove) {
-            // Patient opening play
-            const thinkTime = Math.random() * 120 + 80;
+            // Efficient opening play
+            const thinkTime = Math.random() * 80 + 50;
             
             setTimeout(() => {
                 bestMove = bookMove;
                 sendMove(bookMove);
+                isCalculating = false;
             }, thinkTime);
             
             return;
         }
     }
     
-    // Engine calculation with strategic settings
+    // Engine calculation with active settings
     const depth = getDepth(gamePhase, positionType, timeRemaining);
     
     multiPVLines = [];
     
-    chessEngine.postMessage("position fen " + currentFen);
-    chessEngine.postMessage(`go depth ${depth}`);
+    try {
+        chessEngine.postMessage("position fen " + currentFen);
+        chessEngine.postMessage(`go depth ${depth}`);
+    } catch (e) {
+        isCalculating = false;
+    }
 }
 
 /**
- * Send move - clean and reliable
+ * Send move - clean, reliable, and fast
  */
 function sendMove(move) {
-    if (!webSocketWrapper || !move) return;
+    if (!webSocketWrapper || !move) {
+        isCalculating = false;
+        return;
+    }
     
     try {
-        webSocketWrapper.send(JSON.stringify({
-            t: "move",
-            d: { 
-                u: move, 
-                b: 1,
-                l: Math.floor(Math.random() * 15) + 8,
-                a: 1
+        // Calculate think time for this move
+        const thinkTime = getThinkTime(gamePhase, positionType, timeRemaining);
+        
+        setTimeout(() => {
+            try {
+                webSocketWrapper.send(JSON.stringify({
+                    t: "move",
+                    d: { 
+                        u: move, 
+                        b: 1,
+                        l: Math.floor(Math.random() * 12) + 5,
+                        a: 1
+                    }
+                }));
+            } catch (e) {
+                // Silent catch
             }
-        }));
+            isCalculating = false;
+        }, thinkTime);
     } catch (e) {
-        // Silent catch to prevent errors
+        isCalculating = false;
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// ENGINE MESSAGE HANDLER - AlphaZero Strategic Selection
+// ENGINE MESSAGE HANDLER - AlphaZero ACTIVE Selection
 // ═══════════════════════════════════════════════════════════════════════
 
 function setupChessEngineOnMessage() {
+    if (!chessEngine) return;
+    
     let engineOutput = "";
     
     chessEngine.onmessage = function (event) {
         try {
+            if (!event) return;
+            
             engineOutput += event + "\n";
             
-            // Parse multi-PV lines for strategic move selection
+            // Parse multi-PV lines for active move selection
             if (event.indexOf('multipv') !== -1) {
                 const lines = parseMultiPV(event);
                 if (lines.length > 0) {
@@ -884,9 +1177,15 @@ function setupChessEngineOnMessage() {
                 const moveParts = event.split(" ");
                 bestMove = moveParts[1];
                 
+                if (!bestMove || bestMove === "(none)") {
+                    isCalculating = false;
+                    engineOutput = "";
+                    return;
+                }
+                
                 let finalMove = bestMove;
                 
-                // AlphaZero strategic move selection
+                // AlphaZero ACTIVE move selection
                 if (multiPVLines.length > 1) {
                     finalMove = selectBestStrategicMove(bestMove, multiPVLines, gamePhase, positionType);
                 }
@@ -895,19 +1194,43 @@ function setupChessEngineOnMessage() {
                 engineOutput = "";
             }
         } catch (e) {
-            // Silent catch
+            isCalculating = false;
         }
     };
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// INITIALIZATION - Clean and stable (no page breaking)
+// INITIALIZATION - Clean, stable, no page breaking
 // ═══════════════════════════════════════════════════════════════════════
 
+function initialize() {
+    try {
+        // Wait for Stockfish to load
+        if (typeof window.STOCKFISH !== 'function') {
+            setTimeout(initialize, 100);
+            return;
+        }
+        
+        const engineReady = initializeChessEngine();
+        if (!engineReady) {
+            setTimeout(initialize, 100);
+            return;
+        }
+        
+        interceptWebSocket();
+        setupChessEngineOnMessage();
+    } catch (e) {
+        // Silent initialization failure - don't break page
+    }
+}
+
+// Start initialization
 try {
-    initializeChessEngine();
-    interceptWebSocket();
-    setupChessEngineOnMessage();
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initialize);
+    } else {
+        initialize();
+    }
 } catch (e) {
-    // Silent initialization - don't break page
+    // Silent catch - never break the page
 }
