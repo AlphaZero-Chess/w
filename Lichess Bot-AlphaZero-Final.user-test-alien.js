@@ -996,29 +996,31 @@ function setupChessEngineOnMessage() {
     let lastDepthSeen = 0;
     
     chessEngine.onmessage = function (event) {
-        engineOutput += event + "\n";
+        // ALIEN++: Safely convert event to string (handles both string and object formats)
+        const message = typeof event === 'string' ? event : String(event);
+        engineOutput += message + "\n";
         
         // ALIEN++: Parse evaluation for winning status
-        if (event.indexOf('score') !== -1) {
-            const evalScore = parseEvaluation(event);
+        if (message.indexOf('score') !== -1) {
+            const evalScore = parseEvaluation(message);
             updateWinningStatus(evalScore);
             
             // Track depth progress
-            const depthMatch = event.match(/depth\s+(\d+)/);
+            const depthMatch = message.match(/depth\s+(\d+)/);
             if (depthMatch) {
                 lastDepthSeen = parseInt(depthMatch[1]);
             }
         }
         
-        if (event.indexOf('multipv') !== -1) {
-            const lines = parseMultiPV(event);
+        if (message.indexOf('multipv') !== -1) {
+            const lines = parseMultiPV(message);
             if (lines.length > 0) {
                 multiPVLines = lines;
             }
         }
         
-        if (event && event.indexOf('bestmove') !== -1) {
-            const moveParts = event.split(" ");
+        if (message && message.indexOf('bestmove') !== -1) {
+            const moveParts = message.split(" ");
             bestMove = moveParts[1];
             
             // ALIEN++: Smart move selection with enhanced draw avoidance
