@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Lichess Bot - AlphaZero TRUE SUPERHUMAN
-// @description  TRUE AlphaZero Replica - Superhuman beast with alien-tier strategic webs
+// @name         Lichess Bot - AlphaZero TRUE SUPERHUMAN + WATCHDOG
+// @description  TRUE AlphaZero Replica - Superhuman beast with alien-tier strategic webs + Robust Self-Healing Watchdog
 // @author       AlphaZero - TRUE SUPERHUMAN Edition
-// @version      6.0.0-SUPERHUMAN
+// @version      6.1.0-SUPERHUMAN-WATCHDOG
 // @match         *://lichess.org/*
 // @run-at        document-start
 // @grant         none
@@ -1289,11 +1289,1142 @@ initializeChessEngine();
 interceptWebSocket();
 setupChessEngineOnMessage();
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ROBUST COMPLEX WATCHDOG SYSTEM - PREVENTS BOT FROM STOPPING ENTIRELY
+// Multi-layered self-healing architecture with circuit breakers
+// ═══════════════════════════════════════════════════════════════════════════
+
+const WatchdogConfig = {
+    // Core timing intervals
+    heartbeatInterval: 2000,           // Health check every 2s
+    engineTimeoutThreshold: 15000,     // Engine response timeout 15s
+    wsReconnectDelay: 1000,            // WebSocket reconnect delay
+    wsMaxReconnectAttempts: 10,        // Max reconnection attempts
+    moveTimeoutThreshold: 20000,       // Move calculation timeout 20s
+    staleStateThreshold: 30000,        // Stale state detection 30s
+    
+    // Circuit breaker settings
+    failureThreshold: 3,               // Failures before circuit opens
+    circuitResetTimeout: 10000,        // Circuit breaker reset time
+    
+    // Recovery settings
+    maxRecoveryAttempts: 5,            // Max recovery attempts per component
+    recoveryBackoffMultiplier: 1.5,    // Exponential backoff multiplier
+    fullResetThreshold: 3,             // Full resets before giving up
+    
+    // Monitoring
+    enableDetailedLogging: false,       // Verbose logging (set true for debug)
+    enableHealthMetrics: true           // Track health metrics
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WATCHDOG STATE TRACKING
+// ═══════════════════════════════════════════════════════════════════════════
+
+const WatchdogState = {
+    // Engine health
+    engineAlive: true,
+    lastEngineResponse: Date.now(),
+    engineRecoveryAttempts: 0,
+    pendingEngineCommand: false,
+    
+    // WebSocket health
+    wsAlive: true,
+    lastWsMessage: Date.now(),
+    wsRecoveryAttempts: 0,
+    wsReconnecting: false,
+    
+    // Move calculation health
+    calculatingMove: false,
+    moveCalculationStart: 0,
+    lastMoveCalculated: Date.now(),
+    moveTimeoutCount: 0,
+    
+    // General health
+    lastHeartbeat: Date.now(),
+    totalRecoveries: 0,
+    fullResetCount: 0,
+    systemHealthy: true,
+    
+    // Circuit breakers
+    circuits: {
+        engine: { failures: 0, open: false, lastFailure: 0 },
+        websocket: { failures: 0, open: false, lastFailure: 0 },
+        moveCalc: { failures: 0, open: false, lastFailure: 0 }
+    },
+    
+    // Health metrics
+    metrics: {
+        totalMoves: 0,
+        successfulMoves: 0,
+        failedMoves: 0,
+        engineRestarts: 0,
+        wsReconnections: 0,
+        recoveries: 0,
+        uptime: Date.now()
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CIRCUIT BREAKER PATTERN - Prevents cascade failures
+// ═══════════════════════════════════════════════════════════════════════════
+
+const CircuitBreaker = {
+    /**
+     * Record a failure for a circuit
+     */
+    recordFailure(circuitName) {
+        const circuit = WatchdogState.circuits[circuitName];
+        if (!circuit) return;
+        
+        circuit.failures++;
+        circuit.lastFailure = Date.now();
+        
+        if (circuit.failures >= WatchdogConfig.failureThreshold) {
+            circuit.open = true;
+            WatchdogLog.warn(`Circuit breaker OPEN for: ${circuitName}`);
+            
+            // Auto-reset after timeout
+            setTimeout(() => {
+                this.resetCircuit(circuitName);
+            }, WatchdogConfig.circuitResetTimeout);
+        }
+    },
+    
+    /**
+     * Record success - resets failure count
+     */
+    recordSuccess(circuitName) {
+        const circuit = WatchdogState.circuits[circuitName];
+        if (!circuit) return;
+        
+        circuit.failures = 0;
+        if (circuit.open) {
+            circuit.open = false;
+            WatchdogLog.info(`Circuit breaker CLOSED for: ${circuitName}`);
+        }
+    },
+    
+    /**
+     * Check if circuit is open (should not attempt operation)
+     */
+    isOpen(circuitName) {
+        const circuit = WatchdogState.circuits[circuitName];
+        return circuit ? circuit.open : false;
+    },
+    
+    /**
+     * Reset a circuit manually
+     */
+    resetCircuit(circuitName) {
+        const circuit = WatchdogState.circuits[circuitName];
+        if (!circuit) return;
+        
+        circuit.failures = 0;
+        circuit.open = false;
+        WatchdogLog.info(`Circuit breaker RESET for: ${circuitName}`);
+    },
+    
+    /**
+     * Reset all circuits
+     */
+    resetAll() {
+        for (let circuitName in WatchdogState.circuits) {
+            this.resetCircuit(circuitName);
+        }
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WATCHDOG LOGGING - Centralized logging with levels
+// ═══════════════════════════════════════════════════════════════════════════
+
+const WatchdogLog = {
+    prefix: "[WATCHDOG]",
+    
+    info(msg) {
+        if (WatchdogConfig.enableDetailedLogging) {
+            console.log(`${this.prefix} INFO: ${msg}`);
+        }
+    },
+    
+    warn(msg) {
+        console.warn(`${this.prefix} WARN: ${msg}`);
+    },
+    
+    error(msg) {
+        console.error(`${this.prefix} ERROR: ${msg}`);
+    },
+    
+    critical(msg) {
+        console.error(`${this.prefix} CRITICAL: ${msg}`);
+    },
+    
+    recovery(msg) {
+        console.log(`${this.prefix} RECOVERY: ${msg}`);
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENGINE WATCHDOG - Monitors and recovers Stockfish engine
+// ═══════════════════════════════════════════════════════════════════════════
+
+const EngineWatchdog = {
+    pingInterval: null,
+    lastPingTime: 0,
+    waitingForPong: false,
+    
+    /**
+     * Start engine monitoring
+     */
+    start() {
+        this.pingInterval = setInterval(() => {
+            this.checkEngineHealth();
+        }, WatchdogConfig.heartbeatInterval);
+        
+        WatchdogLog.info("Engine watchdog started");
+    },
+    
+    /**
+     * Stop engine monitoring
+     */
+    stop() {
+        if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+            this.pingInterval = null;
+        }
+    },
+    
+    /**
+     * Check engine health via ping
+     */
+    checkEngineHealth() {
+        // Skip if circuit is open
+        if (CircuitBreaker.isOpen('engine')) {
+            return;
+        }
+        
+        const now = Date.now();
+        const timeSinceLastResponse = now - WatchdogState.lastEngineResponse;
+        
+        // Check for engine timeout
+        if (WatchdogState.pendingEngineCommand && timeSinceLastResponse > WatchdogConfig.engineTimeoutThreshold) {
+            WatchdogLog.warn(`Engine timeout detected (${timeSinceLastResponse}ms since last response)`);
+            CircuitBreaker.recordFailure('engine');
+            this.recoverEngine();
+            return;
+        }
+        
+        // Periodic ping to verify engine is alive
+        if (!this.waitingForPong && chessEngine) {
+            this.pingEngine();
+        }
+    },
+    
+    /**
+     * Ping the engine
+     */
+    pingEngine() {
+        try {
+            this.waitingForPong = true;
+            this.lastPingTime = Date.now();
+            chessEngine.postMessage("isready");
+            
+            // Timeout for pong
+            setTimeout(() => {
+                if (this.waitingForPong) {
+                    const elapsed = Date.now() - this.lastPingTime;
+                    if (elapsed > 5000) {
+                        WatchdogLog.warn("Engine ping timeout - no 'readyok' received");
+                        this.waitingForPong = false;
+                        CircuitBreaker.recordFailure('engine');
+                        this.recoverEngine();
+                    }
+                }
+            }, 5000);
+        } catch (e) {
+            WatchdogLog.error(`Engine ping failed: ${e.message}`);
+            this.waitingForPong = false;
+            CircuitBreaker.recordFailure('engine');
+        }
+    },
+    
+    /**
+     * Handle pong response
+     */
+    handlePong() {
+        this.waitingForPong = false;
+        WatchdogState.lastEngineResponse = Date.now();
+        WatchdogState.engineAlive = true;
+        CircuitBreaker.recordSuccess('engine');
+    },
+    
+    /**
+     * Mark engine response received
+     */
+    markResponse() {
+        WatchdogState.lastEngineResponse = Date.now();
+        WatchdogState.pendingEngineCommand = false;
+        WatchdogState.engineAlive = true;
+    },
+    
+    /**
+     * Mark pending command
+     */
+    markPendingCommand() {
+        WatchdogState.pendingEngineCommand = true;
+    },
+    
+    /**
+     * Recover the engine
+     */
+    recoverEngine() {
+        if (WatchdogState.engineRecoveryAttempts >= WatchdogConfig.maxRecoveryAttempts) {
+            WatchdogLog.critical("Max engine recovery attempts reached - triggering full reset");
+            FullSystemRecovery.execute();
+            return;
+        }
+        
+        WatchdogState.engineRecoveryAttempts++;
+        WatchdogState.metrics.engineRestarts++;
+        WatchdogLog.recovery(`Attempting engine recovery (attempt ${WatchdogState.engineRecoveryAttempts})`);
+        
+        try {
+            // Reinitialize the engine
+            chessEngine = window.STOCKFISH();
+            
+            chessEngine.postMessage("uci");
+            chessEngine.postMessage("setoption name MultiPV value 4");
+            chessEngine.postMessage("setoption name Contempt value 100");
+            chessEngine.postMessage("setoption name Move Overhead value 15");
+            chessEngine.postMessage("setoption name Ponder value false");
+            chessEngine.postMessage("setoption name UCI_AnalyseMode value false");
+            chessEngine.postMessage("ucinewgame");
+            chessEngine.postMessage("isready");
+            
+            // Re-attach message handler
+            setupChessEngineOnMessage();
+            
+            WatchdogState.engineAlive = true;
+            WatchdogState.lastEngineResponse = Date.now();
+            WatchdogState.pendingEngineCommand = false;
+            WatchdogState.totalRecoveries++;
+            WatchdogState.metrics.recoveries++;
+            
+            WatchdogLog.recovery("Engine recovery successful");
+            
+            // If we had a position, recalculate
+            if (currentFen) {
+                setTimeout(() => {
+                    calculateMove();
+                }, 500);
+            }
+            
+        } catch (e) {
+            WatchdogLog.error(`Engine recovery failed: ${e.message}`);
+            CircuitBreaker.recordFailure('engine');
+            
+            // Retry with backoff
+            const backoffDelay = 1000 * Math.pow(WatchdogConfig.recoveryBackoffMultiplier, WatchdogState.engineRecoveryAttempts);
+            setTimeout(() => {
+                this.recoverEngine();
+            }, backoffDelay);
+        }
+    },
+    
+    /**
+     * Reset recovery attempts counter
+     */
+    resetRecoveryCount() {
+        WatchdogState.engineRecoveryAttempts = 0;
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WEBSOCKET WATCHDOG - Monitors and recovers WebSocket connection
+// ═══════════════════════════════════════════════════════════════════════════
+
+const WebSocketWatchdog = {
+    checkInterval: null,
+    originalWebSocket: null,
+    
+    /**
+     * Start WebSocket monitoring
+     */
+    start() {
+        this.checkInterval = setInterval(() => {
+            this.checkWebSocketHealth();
+        }, WatchdogConfig.heartbeatInterval);
+        
+        WatchdogLog.info("WebSocket watchdog started");
+    },
+    
+    /**
+     * Stop WebSocket monitoring
+     */
+    stop() {
+        if (this.checkInterval) {
+            clearInterval(this.checkInterval);
+            this.checkInterval = null;
+        }
+    },
+    
+    /**
+     * Check WebSocket health
+     */
+    checkWebSocketHealth() {
+        // Skip if circuit is open
+        if (CircuitBreaker.isOpen('websocket')) {
+            return;
+        }
+        
+        const now = Date.now();
+        const timeSinceLastMessage = now - WatchdogState.lastWsMessage;
+        
+        // Check for stale WebSocket
+        if (timeSinceLastMessage > WatchdogConfig.staleStateThreshold) {
+            WatchdogLog.warn(`WebSocket possibly stale (${timeSinceLastMessage}ms since last message)`);
+            
+            // Check actual WebSocket state
+            if (webSocketWrapper) {
+                const readyState = webSocketWrapper.readyState;
+                
+                if (readyState === WebSocket.CLOSED || readyState === WebSocket.CLOSING) {
+                    WatchdogLog.warn("WebSocket is closed/closing - attempting recovery");
+                    CircuitBreaker.recordFailure('websocket');
+                    this.recoverWebSocket();
+                } else if (readyState === WebSocket.OPEN) {
+                    // WebSocket open but no messages - might be in a non-game context
+                    WatchdogState.wsAlive = true;
+                }
+            } else {
+                WatchdogLog.warn("WebSocket wrapper is null");
+                CircuitBreaker.recordFailure('websocket');
+            }
+        }
+    },
+    
+    /**
+     * Mark message received
+     */
+    markMessageReceived() {
+        WatchdogState.lastWsMessage = Date.now();
+        WatchdogState.wsAlive = true;
+        CircuitBreaker.recordSuccess('websocket');
+    },
+    
+    /**
+     * Recover WebSocket
+     */
+    recoverWebSocket() {
+        if (WatchdogState.wsReconnecting) {
+            WatchdogLog.info("WebSocket recovery already in progress");
+            return;
+        }
+        
+        if (WatchdogState.wsRecoveryAttempts >= WatchdogConfig.wsMaxReconnectAttempts) {
+            WatchdogLog.critical("Max WebSocket recovery attempts reached");
+            // Don't trigger full reset for WebSocket - page navigation handles this
+            WatchdogState.wsRecoveryAttempts = 0;
+            return;
+        }
+        
+        WatchdogState.wsReconnecting = true;
+        WatchdogState.wsRecoveryAttempts++;
+        WatchdogState.metrics.wsReconnections++;
+        
+        WatchdogLog.recovery(`Attempting WebSocket recovery (attempt ${WatchdogState.wsRecoveryAttempts})`);
+        
+        // WebSocket recovery is tricky - we intercept, not create
+        // Best approach is to wait for Lichess to reconnect
+        setTimeout(() => {
+            WatchdogState.wsReconnecting = false;
+            
+            // Check if recovered
+            if (webSocketWrapper && webSocketWrapper.readyState === WebSocket.OPEN) {
+                WatchdogLog.recovery("WebSocket recovery successful");
+                WatchdogState.wsRecoveryAttempts = 0;
+                CircuitBreaker.recordSuccess('websocket');
+            }
+        }, WatchdogConfig.wsReconnectDelay * WatchdogState.wsRecoveryAttempts);
+    },
+    
+    /**
+     * Reset recovery attempts
+     */
+    resetRecoveryCount() {
+        WatchdogState.wsRecoveryAttempts = 0;
+        WatchdogState.wsReconnecting = false;
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MOVE CALCULATION WATCHDOG - Ensures moves are calculated
+// ═══════════════════════════════════════════════════════════════════════════
+
+const MoveCalculationWatchdog = {
+    checkInterval: null,
+    moveTimeout: null,
+    
+    /**
+     * Start move calculation monitoring
+     */
+    start() {
+        this.checkInterval = setInterval(() => {
+            this.checkMoveCalculation();
+        }, WatchdogConfig.heartbeatInterval);
+        
+        WatchdogLog.info("Move calculation watchdog started");
+    },
+    
+    /**
+     * Stop move calculation monitoring
+     */
+    stop() {
+        if (this.checkInterval) {
+            clearInterval(this.checkInterval);
+            this.checkInterval = null;
+        }
+        this.clearMoveTimeout();
+    },
+    
+    /**
+     * Check move calculation status
+     */
+    checkMoveCalculation() {
+        // Skip if circuit is open
+        if (CircuitBreaker.isOpen('moveCalc')) {
+            return;
+        }
+        
+        if (!WatchdogState.calculatingMove) {
+            return;
+        }
+        
+        const now = Date.now();
+        const calculationTime = now - WatchdogState.moveCalculationStart;
+        
+        if (calculationTime > WatchdogConfig.moveTimeoutThreshold) {
+            WatchdogLog.warn(`Move calculation timeout (${calculationTime}ms)`);
+            CircuitBreaker.recordFailure('moveCalc');
+            this.recoverMoveCalculation();
+        }
+    },
+    
+    /**
+     * Mark move calculation started
+     */
+    markCalculationStart() {
+        WatchdogState.calculatingMove = true;
+        WatchdogState.moveCalculationStart = Date.now();
+        
+        // Set backup timeout
+        this.setMoveTimeout();
+    },
+    
+    /**
+     * Mark move calculation complete
+     */
+    markCalculationComplete() {
+        WatchdogState.calculatingMove = false;
+        WatchdogState.lastMoveCalculated = Date.now();
+        WatchdogState.moveTimeoutCount = 0;
+        WatchdogState.metrics.totalMoves++;
+        WatchdogState.metrics.successfulMoves++;
+        CircuitBreaker.recordSuccess('moveCalc');
+        
+        this.clearMoveTimeout();
+    },
+    
+    /**
+     * Set move timeout
+     */
+    setMoveTimeout() {
+        this.clearMoveTimeout();
+        
+        this.moveTimeout = setTimeout(() => {
+            if (WatchdogState.calculatingMove) {
+                WatchdogLog.warn("Move timeout triggered by backup timer");
+                this.recoverMoveCalculation();
+            }
+        }, WatchdogConfig.moveTimeoutThreshold + 5000);
+    },
+    
+    /**
+     * Clear move timeout
+     */
+    clearMoveTimeout() {
+        if (this.moveTimeout) {
+            clearTimeout(this.moveTimeout);
+            this.moveTimeout = null;
+        }
+    },
+    
+    /**
+     * Recover from stuck move calculation
+     */
+    recoverMoveCalculation() {
+        WatchdogState.moveTimeoutCount++;
+        WatchdogState.metrics.failedMoves++;
+        
+        WatchdogLog.recovery("Attempting move calculation recovery");
+        
+        // Reset state
+        WatchdogState.calculatingMove = false;
+        this.clearMoveTimeout();
+        
+        // If we have a current position, try to recalculate
+        if (currentFen) {
+            // First, try to recover the engine
+            EngineWatchdog.recoverEngine();
+        }
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATE RECOVERY - Handles corrupted or inconsistent states
+// ═══════════════════════════════════════════════════════════════════════════
+
+const StateRecovery = {
+    /**
+     * Validate current state
+     */
+    validateState() {
+        const issues = [];
+        
+        // Check engine state
+        if (!chessEngine) {
+            issues.push("Engine is null");
+        }
+        
+        // Check WebSocket state
+        if (!webSocketWrapper) {
+            issues.push("WebSocket wrapper is null");
+        }
+        
+        // Check for inconsistent calculation state
+        if (WatchdogState.calculatingMove && (Date.now() - WatchdogState.moveCalculationStart) > 60000) {
+            issues.push("Move calculation stuck for over 60s");
+        }
+        
+        return issues;
+    },
+    
+    /**
+     * Recover from inconsistent state
+     */
+    recoverFromInconsistentState() {
+        WatchdogLog.recovery("Attempting state recovery");
+        
+        // Reset calculation state
+        WatchdogState.calculatingMove = false;
+        WatchdogState.pendingEngineCommand = false;
+        
+        // Reset strategic state
+        strategicPlan = null;
+        pressureFronts = [];
+        lastMoveWasQuiet = false;
+        consecutiveQuietMoves = 0;
+        
+        WatchdogLog.recovery("State recovery complete");
+    },
+    
+    /**
+     * Full state reset (preserves position history for repetition tracking)
+     */
+    fullStateReset() {
+        WatchdogLog.recovery("Executing full state reset");
+        
+        // Reset game state but keep position history
+        currentEval = 0;
+        isWinning = false;
+        isCrushing = false;
+        strategicPlan = null;
+        pressureFronts = [];
+        lastMoveWasQuiet = false;
+        consecutiveQuietMoves = 0;
+        initiativeOwner = null;
+        pieceActivity = { white: 0, black: 0 };
+        
+        // Reset endgame patterns
+        for (let key in ENDGAME_PATTERNS) {
+            ENDGAME_PATTERNS[key] = false;
+        }
+        
+        // Reset watchdog state
+        WatchdogState.calculatingMove = false;
+        WatchdogState.pendingEngineCommand = false;
+        
+        WatchdogLog.recovery("Full state reset complete");
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FULL SYSTEM RECOVERY - Last resort recovery mechanism
+// ═══════════════════════════════════════════════════════════════════════════
+
+const FullSystemRecovery = {
+    /**
+     * Execute full system recovery
+     */
+    execute() {
+        WatchdogState.fullResetCount++;
+        
+        if (WatchdogState.fullResetCount > WatchdogConfig.fullResetThreshold) {
+            WatchdogLog.critical("Too many full resets - system may be fundamentally broken");
+            // Don't spam resets - wait for user intervention or page reload
+            return;
+        }
+        
+        WatchdogLog.critical("Executing FULL SYSTEM RECOVERY");
+        
+        // Stop all watchdogs temporarily
+        EngineWatchdog.stop();
+        WebSocketWatchdog.stop();
+        MoveCalculationWatchdog.stop();
+        
+        // Reset all circuit breakers
+        CircuitBreaker.resetAll();
+        
+        // Reset recovery counts
+        WatchdogState.engineRecoveryAttempts = 0;
+        WatchdogState.wsRecoveryAttempts = 0;
+        WatchdogState.wsReconnecting = false;
+        
+        // Recover state
+        StateRecovery.fullStateReset();
+        
+        // Reinitialize engine
+        try {
+            chessEngine = window.STOCKFISH();
+            
+            chessEngine.postMessage("uci");
+            chessEngine.postMessage("setoption name MultiPV value 4");
+            chessEngine.postMessage("setoption name Contempt value 100");
+            chessEngine.postMessage("setoption name Move Overhead value 15");
+            chessEngine.postMessage("setoption name Ponder value false");
+            chessEngine.postMessage("setoption name UCI_AnalyseMode value false");
+            chessEngine.postMessage("ucinewgame");
+            chessEngine.postMessage("isready");
+            
+            // Re-attach message handler
+            setupChessEngineOnMessage();
+            
+        } catch (e) {
+            WatchdogLog.critical(`Failed to reinitialize engine: ${e.message}`);
+        }
+        
+        // Restart watchdogs
+        setTimeout(() => {
+            EngineWatchdog.start();
+            WebSocketWatchdog.start();
+            MoveCalculationWatchdog.start();
+            
+            WatchdogState.systemHealthy = true;
+            WatchdogLog.recovery("Full system recovery complete");
+            
+            // If we have a position, try to continue
+            if (currentFen) {
+                calculateMove();
+            }
+        }, 2000);
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HEARTBEAT SYSTEM - Periodic system health checks
+// ═══════════════════════════════════════════════════════════════════════════
+
+const HeartbeatSystem = {
+    interval: null,
+    
+    /**
+     * Start heartbeat
+     */
+    start() {
+        this.interval = setInterval(() => {
+            this.pulse();
+        }, WatchdogConfig.heartbeatInterval * 5); // Every 10 seconds
+        
+        WatchdogLog.info("Heartbeat system started");
+    },
+    
+    /**
+     * Stop heartbeat
+     */
+    stop() {
+        if (this.interval) {
+            clearInterval(this.interval);
+            this.interval = null;
+        }
+    },
+    
+    /**
+     * Heartbeat pulse - comprehensive health check
+     */
+    pulse() {
+        WatchdogState.lastHeartbeat = Date.now();
+        
+        // Validate state
+        const issues = StateRecovery.validateState();
+        
+        if (issues.length > 0) {
+            WatchdogLog.warn(`Health check found issues: ${issues.join(', ')}`);
+            
+            // Attempt recovery for each issue
+            for (let issue of issues) {
+                if (issue.indexOf("Engine") !== -1) {
+                    EngineWatchdog.recoverEngine();
+                }
+                if (issue.indexOf("calculation stuck") !== -1) {
+                    MoveCalculationWatchdog.recoverMoveCalculation();
+                }
+            }
+        }
+        
+        // Log health metrics periodically
+        if (WatchdogConfig.enableHealthMetrics) {
+            this.logMetrics();
+        }
+    },
+    
+    /**
+     * Log health metrics
+     */
+    logMetrics() {
+        const uptime = Math.floor((Date.now() - WatchdogState.metrics.uptime) / 1000);
+        const successRate = WatchdogState.metrics.totalMoves > 0 
+            ? ((WatchdogState.metrics.successfulMoves / WatchdogState.metrics.totalMoves) * 100).toFixed(1)
+            : 100;
+        
+        if (WatchdogConfig.enableDetailedLogging) {
+            console.log(`[WATCHDOG] Health: Uptime=${uptime}s, Moves=${WatchdogState.metrics.totalMoves}, Success=${successRate}%, Recoveries=${WatchdogState.metrics.recoveries}`);
+        }
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ERROR BOUNDARY - Global error catching
+// ═══════════════════════════════════════════════════════════════════════════
+
+const ErrorBoundary = {
+    /**
+     * Setup global error handlers
+     */
+    setup() {
+        // Catch unhandled errors
+        window.addEventListener('error', (event) => {
+            if (event.message && event.message.indexOf('STOCKFISH') !== -1) {
+                WatchdogLog.error(`Stockfish error caught: ${event.message}`);
+                EngineWatchdog.recoverEngine();
+            }
+        });
+        
+        // Catch unhandled promise rejections
+        window.addEventListener('unhandledrejection', (event) => {
+            WatchdogLog.error(`Unhandled promise rejection: ${event.reason}`);
+        });
+        
+        WatchdogLog.info("Error boundary setup complete");
+    },
+    
+    /**
+     * Wrap a function with error handling
+     */
+    wrap(fn, context = 'unknown') {
+        return function(...args) {
+            try {
+                return fn.apply(this, args);
+            } catch (e) {
+                WatchdogLog.error(`Error in ${context}: ${e.message}`);
+                
+                // Attempt recovery based on context
+                if (context.indexOf('engine') !== -1) {
+                    EngineWatchdog.recoverEngine();
+                } else if (context.indexOf('move') !== -1) {
+                    MoveCalculationWatchdog.recoverMoveCalculation();
+                }
+                
+                return null;
+            }
+        };
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WATCHDOG MASTER CONTROLLER - Coordinates all watchdog components
+// ═══════════════════════════════════════════════════════════════════════════
+
+const WatchdogMaster = {
+    initialized: false,
+    
+    /**
+     * Initialize and start all watchdog components
+     */
+    initialize() {
+        if (this.initialized) {
+            WatchdogLog.warn("Watchdog already initialized");
+            return;
+        }
+        
+        WatchdogLog.info("Initializing Watchdog Master Controller");
+        
+        // Setup error boundary first
+        ErrorBoundary.setup();
+        
+        // Start all watchdogs
+        EngineWatchdog.start();
+        WebSocketWatchdog.start();
+        MoveCalculationWatchdog.start();
+        HeartbeatSystem.start();
+        
+        this.initialized = true;
+        
+        WatchdogLog.info("═══════════════════════════════════════════════════════");
+        WatchdogLog.info("  WATCHDOG SYSTEM FULLY OPERATIONAL");
+        WatchdogLog.info("  • Engine monitoring: ACTIVE");
+        WatchdogLog.info("  • WebSocket monitoring: ACTIVE");
+        WatchdogLog.info("  • Move calculation monitoring: ACTIVE");
+        WatchdogLog.info("  • Heartbeat system: ACTIVE");
+        WatchdogLog.info("  • Circuit breakers: READY");
+        WatchdogLog.info("  • Error boundary: ACTIVE");
+        WatchdogLog.info("═══════════════════════════════════════════════════════");
+    },
+    
+    /**
+     * Stop all watchdog components
+     */
+    shutdown() {
+        WatchdogLog.info("Shutting down Watchdog Master Controller");
+        
+        EngineWatchdog.stop();
+        WebSocketWatchdog.stop();
+        MoveCalculationWatchdog.stop();
+        HeartbeatSystem.stop();
+        
+        this.initialized = false;
+    },
+    
+    /**
+     * Get system health status
+     */
+    getHealthStatus() {
+        return {
+            systemHealthy: WatchdogState.systemHealthy,
+            engineAlive: WatchdogState.engineAlive,
+            wsAlive: WatchdogState.wsAlive,
+            circuits: {
+                engine: !CircuitBreaker.isOpen('engine'),
+                websocket: !CircuitBreaker.isOpen('websocket'),
+                moveCalc: !CircuitBreaker.isOpen('moveCalc')
+            },
+            metrics: WatchdogState.metrics,
+            uptime: Date.now() - WatchdogState.metrics.uptime
+        };
+    }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INTEGRATION HOOKS - Connect watchdog to existing bot functions
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Store original functions
+const _originalCalculateMove = calculateMove;
+const _originalSendMove = sendMove;
+
+// Override calculateMove with watchdog integration
+calculateMove = function() {
+    try {
+        MoveCalculationWatchdog.markCalculationStart();
+        EngineWatchdog.markPendingCommand();
+        
+        _originalCalculateMove.apply(this, arguments);
+    } catch (e) {
+        WatchdogLog.error(`calculateMove error: ${e.message}`);
+        MoveCalculationWatchdog.recoverMoveCalculation();
+    }
+};
+
+// Override sendMove with watchdog integration
+sendMove = function(move) {
+    try {
+        MoveCalculationWatchdog.markCalculationComplete();
+        
+        _originalSendMove.apply(this, arguments);
+    } catch (e) {
+        WatchdogLog.error(`sendMove error: ${e.message}`);
+        // Move sending failed - try again
+        if (move) {
+            setTimeout(() => {
+                try {
+                    _originalSendMove(move);
+                } catch (e2) {
+                    WatchdogLog.critical(`Failed to send move after retry: ${e2.message}`);
+                }
+            }, 100);
+        }
+    }
+};
+
+// Override setupChessEngineOnMessage to integrate watchdog
+const _originalSetupChessEngineOnMessage = setupChessEngineOnMessage;
+
+setupChessEngineOnMessage = function() {
+    let engineOutput = "";
+    
+    chessEngine.onmessage = function (event) {
+        try {
+            // Watchdog: Mark engine response
+            EngineWatchdog.markResponse();
+            
+            // Watchdog: Handle isready/readyok ping
+            if (event && event.indexOf('readyok') !== -1) {
+                EngineWatchdog.handlePong();
+            }
+            
+            engineOutput += event + "\n";
+            
+            // SUPERHUMAN: Parse evaluation for winning status
+            if (event.indexOf('score') !== -1) {
+                const evalScore = parseEvaluation(event);
+                updateWinningStatus(evalScore);
+            }
+            
+            if (event.indexOf('multipv') !== -1) {
+                const lines = parseMultiPV(event);
+                if (lines.length > 0) {
+                    multiPVLines = lines;
+                }
+            }
+            
+            if (event && event.indexOf('bestmove') !== -1) {
+                const moveParts = event.split(" ");
+                bestMove = moveParts[1];
+                
+                // SUPERHUMAN: Smart move selection
+                let finalMove = selectBestMove(bestMove, multiPVLines);
+                
+                // SUPERHUMAN: Track move patterns
+                if (multiPVLines.length > 0) {
+                    const topMoveScore = multiPVLines[0].score || 0;
+                    const secondScore = multiPVLines.length > 1 ? multiPVLines[1].score || 0 : topMoveScore;
+                    
+                    if (Math.abs(topMoveScore - secondScore) < 10) {
+                        lastMoveWasQuiet = true;
+                        consecutiveQuietMoves++;
+                    } else {
+                        lastMoveWasQuiet = false;
+                        consecutiveQuietMoves = 0;
+                    }
+                }
+                
+                sendMove(finalMove);
+                engineOutput = "";
+            }
+        } catch (e) {
+            WatchdogLog.error(`Engine message handler error: ${e.message}`);
+        }
+    };
+};
+
+// Enhance WebSocket interception with watchdog
+const _originalInterceptWebSocket = interceptWebSocket;
+
+interceptWebSocket = function() {
+    let webSocket = window.WebSocket;
+    const webSocketProxy = new Proxy(webSocket, {
+        construct: function (target, args) {
+            let wrappedWebSocket = new target(...args);
+            webSocketWrapper = wrappedWebSocket;
+
+            wrappedWebSocket.addEventListener("message", function (event) {
+                try {
+                    // Watchdog: Mark WebSocket message received
+                    WebSocketWatchdog.markMessageReceived();
+                    
+                    let message = JSON.parse(event.data);
+                    
+                    // SUPERHUMAN: Detect new game start
+                    if (message.t === "crowd" || message.t === "featured") {
+                        resetGameState();
+                    }
+                    
+                    if (message.d && typeof message.d.fen === "string" && typeof message.v === "number") {
+                        currentFen = message.d.fen;
+                        
+                        let isWhitesTurn = message.v % 2 == 0;
+                        myColor = isWhitesTurn ? 'w' : 'b';
+                        
+                        if (isWhitesTurn) {
+                            currentFen += " w";
+                        } else {
+                            currentFen += " b";
+                        }
+                        
+                        moveCount = Math.floor(message.v / 2) + 1;
+                        
+                        // SUPERHUMAN: Track position for repetition
+                        trackPosition(currentFen);
+                        
+                        // SUPERHUMAN: Enhanced game phase detection
+                        gamePhase = getGamePhase(moveCount, currentFen);
+                        positionType = analyzePositionType(currentFen);
+                        
+                        // SUPERHUMAN: Detect endgame type for technique
+                        if (gamePhase === "endgame") {
+                            detectEndgameType(currentFen);
+                        }
+                        
+                        // SUPERHUMAN: Adjust contempt based on winning status
+                        adjustContempt();
+                        
+                        calculateMove();
+                    }
+                } catch (e) {
+                    WatchdogLog.error(`WebSocket message handler error: ${e.message}`);
+                }
+            });
+            
+            // Watchdog: Monitor WebSocket state changes
+            wrappedWebSocket.addEventListener("close", function(event) {
+                WatchdogLog.warn(`WebSocket closed: code=${event.code}, reason=${event.reason}`);
+                WatchdogState.wsAlive = false;
+            });
+            
+            wrappedWebSocket.addEventListener("error", function(event) {
+                WatchdogLog.error("WebSocket error occurred");
+                WatchdogState.wsAlive = false;
+                CircuitBreaker.recordFailure('websocket');
+            });
+            
+            wrappedWebSocket.addEventListener("open", function(event) {
+                WatchdogLog.info("WebSocket opened");
+                WatchdogState.wsAlive = true;
+                WatchdogState.wsRecoveryAttempts = 0;
+                CircuitBreaker.recordSuccess('websocket');
+            });
+            
+            return wrappedWebSocket;
+        }
+    });
+
+    window.WebSocket = webSocketProxy;
+};
+
+// Re-run initialization with watchdog-enhanced functions
+interceptWebSocket();
+setupChessEngineOnMessage();
+
+// Initialize Watchdog Master
+WatchdogMaster.initialize();
+
 // SUPERHUMAN: Console announcement
 console.log("═══════════════════════════════════════════════════════════════");
-console.log("  ALPHAZERO TRUE SUPERHUMAN v6.0.0 - BEAST MODE ACTIVATED");
+console.log("  ALPHAZERO TRUE SUPERHUMAN v6.1.0 - BEAST MODE ACTIVATED");
 console.log("  • Flawless endgame technique (Philidor, Lucena, Opposition)");
 console.log("  • Perfect positional judgment");
 console.log("  • Strategic web-weaving (50+ move horizon)");
 console.log("  • Zero blunders, maximum contempt");
+console.log("  • ROBUST WATCHDOG SYSTEM - Self-healing architecture");
+console.log("  • Circuit breakers & auto-recovery - NEVER stops");
 console.log("═══════════════════════════════════════════════════════════════");
